@@ -1,5 +1,5 @@
 #!/bin/bash
-cd "/home/bram/Restaurant Simulator"
+cd "/home/bram/Restaurant Simulator/ml"
 # Gebruik python3.12 (heeft numpy/torch) i.p.v. conda's python3
 PYTHON=python3.12
 echo "=== Overnight data collector ==="

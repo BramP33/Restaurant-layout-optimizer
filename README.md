@@ -118,13 +118,16 @@ xdg-open simulatie.html     # Linux
 **Prerequisites:**
 ```bash
 pip install numpy scikit-learn xgboost joblib torch torch-geometric
-npm install   # installs Playwright for headless validation
+cd ml && npm install   # installs Playwright for headless validation
 ```
 
 **Full active learning cycle:**
 
 ```bash
-# 1. Export training data from the browser (use the "Export batch" button)
+cd ml
+
+# 1. Export training data from the browser (use the "Export batch" button),
+#    place the downloaded JSON files in ml/
 
 # 2. Merge batch files
 python3 merge_datasets.py
@@ -145,7 +148,7 @@ python3 active_learning.py --validated validation-results.json
 
 **Or run a full overnight optimization cycle:**
 ```bash
-bash start_overnight.sh
+bash ml/start_overnight.sh
 ```
 
 ---
@@ -153,17 +156,19 @@ bash start_overnight.sh
 ## Project structure
 
 ```
-simulatie.html          # Full browser simulator (single file, no build step)
-optimize_layout.py      # Surrogate-guided layout search (500k candidates)
-train_surrogate.py      # RF/XGBoost/GBT comparison, saves best model
-train_gnn.py            # GATv2 GNN trainer (GPU-accelerated)
-gnn_layout.py           # GNN architecture + graph builder + gradient optimizer
-validate_headless.js    # Playwright headless validator
-active_learning.py      # Merge → retrain → optimize loop
-merge_datasets.py       # Combines batch export files
-collect_overnight.py    # Unattended overnight data collection
-start_overnight.sh      # Shell wrapper for overnight runs
-best-layout.json        # Best layout found (252k px, confirmed)
+simulatie.html              # Full browser simulator (single file, no build step)
+best-layout.json            # Best layout found (252k px, confirmed)
+ml/
+├── optimize_layout.py      # Surrogate-guided layout search (500k candidates)
+├── train_surrogate.py      # RF/XGBoost/GBT comparison, saves best model
+├── train_gnn.py            # GATv2 GNN trainer (GPU-accelerated)
+├── gnn_layout.py           # GNN architecture + graph builder + gradient optimizer
+├── validate_headless.js    # Playwright headless validator
+├── active_learning.py      # Merge → retrain → optimize loop
+├── merge_datasets.py       # Combines batch export files
+├── collect_overnight.py    # Unattended overnight data collection
+├── start_overnight.sh      # Shell wrapper for overnight runs
+└── package.json            # Playwright dependency
 ```
 
 ---

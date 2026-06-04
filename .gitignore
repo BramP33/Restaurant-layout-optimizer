@@ -1,10 +1,14 @@
 # Large data files
 restaurant-sim-batch-*.json
 restaurant-sim-merged.json
+ml/restaurant-sim-batch-*.json
+ml/restaurant-sim-merged.json
 
 # Trained model artifacts (large binaries)
 surrogate_model.pkl
 gnn_model.pt
+ml/surrogate_model.pkl
+ml/gnn_model.pt
 
 # Node
 node_modules/
@@ -16,9 +20,20 @@ __pycache__/
 .venv/
 venv/
 
-# Validation output (regenerate with validate_headless.js)
+# Generated output (regenerate with scripts in ml/)
 validation-results.json
 optimizer-results.json
+ml/validation-results.json
+ml/optimizer-results.json
+ml/_batch_layouts.json
+ml/_batch_validated.json
+
+# Internal AI tool config
+CLAUDE.md
+
+# Intermediate validation artifacts
+best-layout-validate.json
+best-new-validate.json
 
 # OS
 .DS_Store
