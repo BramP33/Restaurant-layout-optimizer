@@ -20,7 +20,8 @@ The ML pipeline collects thousands of these simulation runs, trains a surrogate 
 
 Open `simulatie.html` directly in a browser — no build step, no server needed.
 
-![Simulator screenshot placeholder](docs/screenshot.png)
+!<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/38bdbaa5-1150-4d52-80d3-f4cd0067026c" />
+
 
 Use the sidebar controls to adjust guest count, waiter count, table mix, and simulation speed. The efficiency score updates live.
 
