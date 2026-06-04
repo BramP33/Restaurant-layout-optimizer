@@ -1,0 +1,25 @@
+# Large data files
+restaurant-sim-batch-*.json
+restaurant-sim-merged.json
+
+# Trained model artifacts (large binaries)
+surrogate_model.pkl
+gnn_model.pt
+
+# Node
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Validation output (regenerate with validate_headless.js)
+validation-results.json
+optimizer-results.json
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,3530 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Restaurant Simulation — Agent-Based Layout Optimizer</title>
+<style>
+  /*
+   * Restaurant simulation — single-file vanilla JS + Canvas 2D.
+   * Dark, data-dense UI: thin left sidebar of controls, large canvas in the
+   * middle, right metrics panel updated once per second.
+   *
+   * The design intentionally avoids a "playful game" aesthetic: agents are
+   * abstract circles and squares, the room is a flat top-down floorplan, and
+   * the palette is restrained (one warm accent for primary actions; mood
+   * colors only on the agents themselves to encode state).
+   */
+  :root {
+    --bg: #0a0a0f;
+    --panel: #111118;
+    --panel-2: #16161f;
+    --border: #24242f;
+    --text: #d8d8df;
+    --muted: #82828f;
+    --accent: #f5a623;
+    --accent-hover: #d98c0f;
+    --good: #6ad17a;
+    --warn: #f1c14a;
+    --bad:  #ef5454;
+    --mono: ui-monospace, SFMono-Regular, "JetBrains Mono", "Menlo", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%; width: 100%;
+    background: var(--bg); color: var(--text);
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+  .app {
+    display: grid;
+    grid-template-columns: 280px 1fr 300px;
+    grid-template-rows: 1fr;
+    height: 100vh; width: 100vw;
+  }
+  .sidebar, .metrics {
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    padding: 18px 16px;
+    overflow-y: auto;
+    font-size: 12.5px;
+  }
+  .metrics { border-right: 0; border-left: 1px solid var(--border); }
+  .stage {
+    background: var(--bg);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    position: relative; overflow: hidden;
+    padding: 12px;
+  }
+  canvas.editing { cursor: crosshair; border-color: var(--accent); }
+  .editor-bar {
+    display: none;
+    flex-direction: row;
+    gap: 6px;
+    margin-bottom: 10px;
+    padding: 8px 10px;
+    background: var(--panel);
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    align-items: center;
+  }
+  .editor-bar.active { display: flex; }
+  .editor-bar .tool-label { font-size: 11px; color: var(--muted); }
+  .editor-bar button {
+    width: auto; margin: 0;
+    padding: 6px 10px;
+    font-size: 11px;
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+  }
+  .editor-bar button.selected {
+    background: var(--accent);
+    color: #1a1209;
+    border-color: var(--accent);
+  }
+  .editor-bar .hint-text {
+    font-size: 11px; color: var(--muted); margin-left: 8px;
+  }
+  canvas {
+    display: block;
+    background: #08080d;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.5);
+    max-width: calc(100vw - 600px);
+    max-height: calc(100vh - 40px);
+    width: auto;
+    height: auto;
+    object-fit: contain;
+  }
+  h1 {
+    font-size: 13px; letter-spacing: 0.12em; text-transform: uppercase;
+    margin: 0 0 14px 0; color: var(--muted); font-weight: 600;
+  }
+  h2 {
+    font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+    margin: 16px 0 8px 0; color: var(--muted); font-weight: 600;
+  }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+  .row label { color: var(--text); font-size: 12px; }
+  .row .val { color: var(--muted); font-family: var(--mono); font-size: 11px; min-width: 36px; text-align: right; }
+  input[type=range] {
+    width: 100%; accent-color: var(--accent); background: transparent;
+  }
+  input[type=number], select {
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 4px 6px; font-family: var(--mono); font-size: 12px; width: 64px;
+  }
+  select { width: 100%; }
+  button {
+    background: var(--accent); color: #1a1209; border: 0;
+    border-radius: 4px; padding: 9px 12px; font-weight: 600;
+    cursor: pointer; font-size: 12px; width: 100%; margin-top: 8px;
+    letter-spacing: 0.02em;
+    transition: background 0.15s ease;
+  }
+  button:hover { background: var(--accent-hover); }
+  button.secondary {
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border);
+  }
+  button.secondary:hover { background: #1d1d28; }
+  .stat {
+    display: flex; justify-content: space-between; padding: 7px 0;
+    border-bottom: 1px dashed var(--border);
+    font-size: 12px;
+  }
+  .stat:last-child { border-bottom: 0; }
+  .stat .k { color: var(--muted); }
+  .stat .v { font-family: var(--mono); color: var(--text); }
+  .stat .v.good { color: var(--good); }
+  .stat .v.warn { color: var(--warn); }
+  .stat .v.bad  { color: var(--bad); }
+  .legend { font-size: 11px; color: var(--muted); line-height: 1.5; }
+  .legend .item { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
+  .legend .dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    display: inline-block; flex: 0 0 10px;
+  }
+  .legend .sq {
+    width: 10px; height: 10px; border-radius: 2px;
+    display: inline-block; flex: 0 0 10px;
+  }
+  .hint {
+    font-size: 10.5px; color: var(--muted); line-height: 1.45;
+    margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border);
+  }
+  .mix { display: grid; grid-template-columns: 1fr 50px; gap: 6px 8px; align-items: center; }
+  .mix label { font-size: 12px; }
+  .editor-bar { flex-wrap: wrap; }
+  .editor-bar .tool-sep { width: 100%; height: 0; border-top: 1px solid var(--border); margin: 4px 0; }
+  .editor-bar button.confirm-btn {
+    background: var(--good); color: #0a150c; border-color: var(--good);
+  }
+  .editor-bar button.confirm-btn:hover { background: #52b863; }
+  #presetGallery {
+    display: flex; flex-wrap: wrap; gap: 5px; padding: 6px;
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 4px; margin-top: 6px; min-height: 28px;
+    font-size: 11px;
+  }
+  #presetGallery .no-presets { color: var(--muted); font-size: 11px; }
+  #presetGallery .preset-item {
+    display: flex; align-items: center; gap: 4px;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 3px; padding: 3px 6px; cursor: pointer;
+    font-size: 11px; color: var(--text);
+  }
+  #presetGallery .preset-item:hover { border-color: var(--accent); }
+  #presetGallery .preset-item.active { border-color: var(--accent); background: rgba(245,166,35,0.15); }
+  #presetGallery .preset-item .pdel {
+    background: none; border: none; color: var(--muted);
+    cursor: pointer; padding: 0 2px; font-size: 12px; line-height: 1;
+    width: auto; margin: 0;
+  }
+  #presetGallery .preset-item .pdel:hover { color: var(--bad); background: none; }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- LEFT: CONTROLS ----------------------------------------------------- -->
+  <aside class="sidebar">
+    <h1>Restaurant Sim</h1>
+
+    <h2>Room</h2>
+    <div class="row">
+      <label>Width</label>
+      <input id="roomW" type="number" min="600" max="1400" step="20" value="640" />
+    </div>
+    <div class="row">
+      <label>Height</label>
+      <input id="roomH" type="number" min="400" max="900" step="20" value="640" />
+    </div>
+    <div class="row">
+      <label>Grid</label>
+      <input id="gridSize" type="number" min="16" max="48" step="4" value="24" />
+    </div>
+
+    <h2>Party Type</h2>
+    <select id="partyType">
+      <option value="receptie">Receptie (2.5h)</option>
+      <option value="buffet" selected>Warm-koud buffet (5h)</option>
+      <option value="feestavond">Feestavond (6.5h)</option>
+    </select>
+
+    <h2>Population</h2>
+    <div class="row">
+      <label>Guests</label>
+      <span class="val" id="guestsVal">20</span>
+    </div>
+    <input id="guests" type="range" min="5" max="100" step="1" value="50" />
+    <div class="row" style="margin-top:8px">
+      <label>Waiters</label>
+      <span class="val" id="waitersVal">3</span>
+    </div>
+    <input id="waiters" type="range" min="1" max="6" step="1" value="3" />
+
+    <h2>Table Mix</h2>
+    <button id="tableTypeEditorBtn" class="secondary" style="width:100%;margin-bottom:8px;">⚙ Tafeltypen</button>
+    <div class="mix">
+      <label>Small (<span id="labelSmallSeats">2</span> seats)</label>
+      <input id="tSmall" type="number" min="0" max="20" step="1" value="0" />
+      <label>Medium (<span id="labelMediumSeats">4</span> seats)</label>
+      <input id="tMedium" type="number" min="0" max="20" step="1" value="6" />
+      <label>Large (<span id="labelLargeSeats">6</span> seats)</label>
+      <input id="tLarge" type="number" min="0" max="20" step="1" value="2" />
+    </div>
+
+    <h2>Speed</h2>
+    <select id="speed">
+      <option value="1">1×</option>
+      <option value="2">2×</option>
+      <option value="5">5×</option>
+      <option value="10">10×</option>
+      <option value="30">30×</option>
+      <option value="60" selected>60×</option>
+      <option value="120">120×</option>
+    </select>
+
+    <h2>Seed</h2>
+    <div class="row">
+      <input id="seed" type="number" placeholder="Random" />
+    </div>
+    <div class="hint" style="margin-bottom: 12px; font-size: 11px;">
+      Leave empty for random. Last run used seed: <span id="lastSeed">—</span>
+    </div>
+
+    <h2>Layout Editor</h2>
+    <button id="editLayoutBtn" class="secondary">Edit Layout</button>
+    <div style="font-size: 11px; color: var(--muted); margin-top: 6px;">
+      Vast: <span id="fixedCount">0</span> · Getekend: <span id="drawnCount">0</span> · Obstakels: <span id="obstacleCount">0</span>
+    </div>
+
+    <button id="runBtn" style="margin-top: 14px;">Run New Simulation</button>
+    <div id="seatError" style="display:none;margin-top:6px;padding:6px 8px;background:rgba(239,84,84,0.15);border:1px solid #ef5454;border-radius:4px;font-size:11px;color:#ef5454;line-height:1.4;"></div>
+    <button id="pauseBtn" class="secondary">Pause</button>
+
+    <h2>Run History</h2>
+    <div style="display: flex; gap: 6px; margin-bottom: 8px;">
+      <button id="clearHistoryBtn" class="secondary" style="flex: 1; margin: 0;">Clear</button>
+      <button id="exportHistoryBtn" class="secondary" style="flex: 1; margin: 0;">Export</button>
+    </div>
+    <div id="runHistoryList" style="max-height: 180px; overflow-y: auto; border: 1px solid var(--border); border-radius: 4px; padding: 6px; background: var(--panel-2);">
+      <div style="color: var(--muted); font-size: 11px; padding: 4px;">No runs yet</div>
+    </div>
+
+    <div class="hint">
+      Each new run regenerates the table layout via a scoring optimizer that
+      minimizes waiter travel distance while keeping corridor widths and
+      grouping tables of similar size.
+    </div>
+
+    <h2>Batch Generator</h2>
+    <div class="row">
+      <label>Layouts</label>
+      <input id="batchCount" type="number" min="10" max="2000" step="10" value="200" />
+    </div>
+    <div class="row">
+      <label>Seeds / layout</label>
+      <input id="batchSeeds" type="number" min="1" max="20" step="1" value="5" title="Aantal keer dat elke layout gesimuleerd wordt (gemiddelde vermindert ruis)" />
+    </div>
+    <select id="batchConfigMode" style="width:100%;margin-bottom:6px;">
+      <option value="current">Huidige config (alleen seed varieert)</option>
+      <option value="random">Willekeurig (alle params)</option>
+    </select>
+    <button id="batchStartBtn">▶ Genereer Dataset</button>
+    <button id="batchStopBtn" class="secondary" style="display:none;">■ Stop</button>
+    <div id="batchProgressWrap" style="display:none;margin-top:8px;">
+      <div style="height:6px;background:var(--panel-2);border-radius:3px;overflow:hidden;margin-bottom:4px;">
+        <div id="batchBar" style="height:100%;width:0%;background:var(--accent);border-radius:3px;transition:width 0.3s;"></div>
+      </div>
+      <div id="batchStatus" style="font-size:11px;color:var(--muted);font-family:var(--mono);"></div>
+    </div>
+    <button id="batchExportBtn" class="secondary" style="display:none;margin-top:6px;">⬇ Download JSON</button>
+
+    <h2>Optimizer Validatie</h2>
+    <input type="file" id="optFile" accept=".json" style="display:none">
+    <button id="optLoadBtn" class="secondary" style="width:100%;margin-bottom:6px;">📂 Laad optimizer-results.json</button>
+    <div id="optPanel" style="display:none">
+      <div class="row">
+        <label>Layout</label>
+        <select id="optSelect" style="flex:1;font-size:11px;"></select>
+      </div>
+      <div id="optPred" style="font-size:11px;color:var(--muted);margin:4px 0 6px;font-family:var(--mono);"></div>
+      <div class="row">
+        <label>Seeds</label>
+        <input id="optSeeds" type="number" min="1" max="20" value="5" step="1" style="width:60px;">
+      </div>
+      <button id="optValidateBtn" style="width:100%;margin-top:4px;">▶ Valideer in simulator</button>
+      <div id="optResult" style="font-size:11px;font-family:var(--mono);margin-top:6px;line-height:1.6;"></div>
+    </div>
+  </aside>
+
+  <!-- CENTER: CANVAS ----------------------------------------------------- -->
+  <main class="stage">
+    <div id="editorBar" class="editor-bar">
+      <span class="tool-label">Vast:</span>
+      <button data-tool="fixed-small" class="selected">S</button>
+      <button data-tool="fixed-medium">M</button>
+      <button data-tool="fixed-large">L</button>
+      <button data-tool="obstacle">Obstakel</button>
+      <button data-tool="delete">Verwijder</button>
+      <div class="tool-sep"></div>
+      <span class="tool-label">Teken:</span>
+      <button data-tool="draw-table-rect">▭ Tafel</button>
+      <button data-tool="draw-table-circle">◯ Rond</button>
+      <button id="confirmChairBtn" class="confirm-btn" style="display:none;width:auto;padding:6px 10px;font-size:11px;margin:0;">✓ Bevestig</button>
+      <span class="hint-text" id="editHint">Klik op canvas om een kleine vaste tafel te plaatsen</span>
+    </div>
+    <div id="presetGallery" style="display:none;max-width:calc(100vw - 624px);"><span class="no-presets">Geen presets opgeslagen</span></div>
+    <canvas id="stage" width="1000" height="640"></canvas>
+  </main>
+
+  <!-- RIGHT: METRICS ----------------------------------------------------- -->
+  <aside class="metrics">
+    <h1>Metrics</h1>
+    <div class="stat"><span class="k">Sim time</span><span class="v" id="mTime">00:00</span></div>
+    <div class="stat"><span class="k">Avg wait time</span><span class="v" id="mWait">—</span></div>
+    <div class="stat"><span class="k">Waiter distance</span><span class="v" id="mDist">0</span></div>
+    <div class="stat"><span class="k">Impatient guests</span><span class="v" id="mImp">0</span></div>
+    <div class="stat"><span class="k">Served drinks</span><span class="v" id="mServed">0</span></div>
+    <div class="stat"><span class="k">Guests left</span><span class="v" id="mLeft">0</span></div>
+
+    <h2>Layout</h2>
+    <div class="stat"><span class="k">Party</span><span class="v" id="mParty">—</span></div>
+    <div class="stat"><span class="k">Party duration</span><span class="v" id="mPartyDur">—</span></div>
+    <div class="stat"><span class="k">Efficiency score</span><span class="v" id="mScore">—</span></div>
+    <div class="stat"><span class="k">Best score</span><span class="v good" id="mBest">—</span></div>
+    <div class="stat"><span class="k">Run #</span><span class="v" id="mRun">1</span></div>
+    <div class="stat"><span class="k">Seed</span><span class="v" id="mSeed">—</span></div>
+
+    <h2>Legend</h2>
+    <div class="legend">
+      <div class="item"><span class="dot" style="background:#6ad17a"></span>Happy / seated</div>
+      <div class="item"><span class="dot" style="background:#f1c14a"></span>Waiting for drinks</div>
+      <div class="item"><span class="dot" style="background:#ef5454"></span>Impatient (at bar)</div>
+      <div class="item"><span class="dot" style="background:#7cc3ff"></span>Drinking</div>
+      <div class="item"><span class="dot" style="background:#c084fc"></span>Socializing</div>
+      <div class="item"><span class="dot" style="background:#a0a0a0"></span>Toilet / walking</div>
+      <div class="item"><span class="sq"  style="background:#f5a623"></span>Waiter (one color each)</div>
+    </div>
+
+    <div class="hint">
+      Wait threshold is 18 simulated seconds. After that, guests leave the
+      table for the bar and count as impatient — a major efficiency penalty.
+    </div>
+  </aside>
+</div>
+
+<!-- TABLE TYPE EDITOR MODAL -->
+<div id="tableTypeModal" style="display:none; position:fixed; inset:0;
+     background:rgba(0,0,0,0.72); z-index:100; align-items:center; justify-content:center;">
+  <div style="background:var(--panel); border:1px solid var(--accent); border-radius:8px;
+              padding:24px; width:600px; max-width:95vw; font-size:12px; color:var(--text);">
+    <h2 style="margin:0 0 16px; font-size:12px; text-transform:uppercase;
+               letter-spacing:.1em; color:var(--muted);">Tafeltypen configureren</h2>
+    <div id="tteCols" style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:16px;"></div>
+    <div style="display:flex; gap:8px; margin-top:20px;">
+      <button id="tteApplyBtn"  style="flex:1; margin:0;">Toepassen</button>
+      <button id="tteResetBtn"  class="secondary" style="flex:1; margin:0;">Standaard</button>
+      <button id="tteCancelBtn" class="secondary" style="flex:1; margin:0;">Annuleren</button>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+/* =====================================================================
+ *  Restaurant Simulation — vanilla JS / Canvas 2D
+ *  ---------------------------------------------------------------------
+ *  Design goals (recap of the brief in this file's vocabulary):
+ *
+ *  - One self-contained HTML file. No build step, no npm, no external
+ *    libraries. The whole app is here — markup, styles, simulation.
+ *  - Agent-based: every guest and every waiter is an independent
+ *    entity with its own state machine. The world is just a list of
+ *    these agents plus a list of furniture rectangles.
+ *  - An optimizer regenerates the floor plan each run. Layouts can
+ *    therefore be compared against each other on the efficiency score
+ *    metric so the user gets a sense of which configurations work.
+ *  - Time is decoupled from frame rate. All movement is integrated
+ *    with a delta-time variable scaled by a user-controlled multiplier,
+ *    so 1x / 2x / 5x / 10x behave like "wall clock" / "fast forward".
+ *
+ *  Why not write this as a single God function?
+ *    Splitting the world into Guest, Waiter, Table, and SimulationEngine
+ *    classes mirrors the conceptual model and keeps each concern in one
+ *    place. Adding a new agent role later (e.g. "chef") would mean a
+ *    new class with a new step()/draw() pair — not a rewrite of the
+ *    main loop. Likewise, swapping the layout optimizer for a smarter
+ *    algorithm only touches one method, generateLayout(), without
+ *    rippling through state-machine code.
+ * =====================================================================
+ *  ---------------------------------------------------------------------
+ *  High-level architecture
+ *
+ *  - SimulationEngine owns the world: room dimensions, the table layout,
+ *    arrays of Guests and Waiters, the bar, the entrance, the metrics
+ *    object, and the requestAnimationFrame loop.
+ *  - Layout generation is a small randomized optimizer: it samples many
+ *    candidate placements per table, scoring each by waiter-distance,
+ *    corridor clearance, and grouping with similar-sized neighbours.
+ *  - Guests are agents that progress through a small state machine:
+ *      WALKING -> SEATED -> WAITING -> DRINKING -> SOCIALIZING -> LEAVING
+ *    Plus optional excursions to TOILET or BAR (when impatient).
+ *  - Waiters are agents that loop through tasks:
+ *      IDLE -> WALKING_TO_TABLE -> TAKING_ORDER -> WALKING_TO_BAR
+ *           -> COLLECTING_DRINKS -> SERVING -> IDLE
+ *    A waiter can carry up to 8 drinks at once and will combine orders
+ *    from multiple tables on one trip using a nearest-first heuristic.
+ *  - All movement is integrated with delta-time in pixels-per-second so
+ *    that the simulation speed multiplier is decoupled from frame rate.
+ *
+ *  Why an optimizer per run?
+ *    The task asks the simulation to feel "agent-based with an AI/simple
+ *    optimizer" that generates fresh layouts and scores them. A heavy
+ *    ML model is overkill for a single-page demo, so we use a random
+ *    sampler with a hand-tuned cost function — a textbook "weak AI"
+ *    optimizer that produces visibly different layouts every run and
+ *    can be ranked against previous attempts via the best-score record.
+ * ===================================================================== */
+
+// -----------------------------------------------------------------------
+//  Party type configuration
+// -----------------------------------------------------------------------
+const PARTY_TYPES = {
+  receptie: {
+    label: "Receptie",
+    durationSec: 2.5 * 3600,
+    arrivalWindowSec: 20 * 60,
+    firstHourDrinks: 4,
+    perHourDrinksRange: [3, 3],
+    toiletVisitsAvg: 1.5,
+    socializeChance: 0.35,
+  },
+  buffet: {
+    label: "Warm-koud buffet",
+    durationSec: 5 * 3600,
+    arrivalWindowSec: 30 * 60,
+    firstHourDrinks: 3,
+    perHourDrinksRange: [1, 2],
+    toiletVisitsAvg: 2.5,
+    socializeChance: 0.18,
+  },
+  feestavond: {
+    label: "Feestavond",
+    durationSec: 6.5 * 3600,
+    arrivalWindowSec: 45 * 60,
+    firstHourDrinks: 3,
+    perHourDrinksRange: [1, 2],
+    toiletVisitsAvg: 3,
+    socializeChance: 0.30,
+  },
+};
+
+// -----------------------------------------------------------------------
+//  Table type definitions — customisable per type, persisted in localStorage
+// -----------------------------------------------------------------------
+const DEFAULT_TABLE_TYPE_DEFS = {
+  small:  { w: 60,  h: 60,  seats: 2, shape: "rect" },
+  medium: { w: 80,  h: 60,  seats: 4, shape: "rect" },
+  large:  { w: 110, h: 70,  seats: 6, shape: "rect" },
+  // Combineerbare losse tafels (elk blok 60×60, 2 stoelen).
+  // comb2 = 2 tafels aaneen, comb3 = 3 tafels, comb4 = 4 tafels.
+  comb1:  { w:  60, h: 60,  seats: 2, shape: "rect" },
+  comb2:  { w: 120, h: 60,  seats: 4, shape: "rect" },
+  comb3:  { w: 180, h: 60,  seats: 6, shape: "rect" },
+  comb4:  { w: 240, h: 60,  seats: 8, shape: "rect" },
+};
+let tableTypeDefs = (() => {
+  try {
+    return Object.assign({}, DEFAULT_TABLE_TYPE_DEFS,
+      JSON.parse(localStorage.getItem("restaurantSim.tableTypes") || "null") || {});
+  } catch (e) { return Object.assign({}, DEFAULT_TABLE_TYPE_DEFS); }
+})();
+function getTableTypeDef(size) {
+  return tableTypeDefs[size] || DEFAULT_TABLE_TYPE_DEFS[size] || DEFAULT_TABLE_TYPE_DEFS.large;
+}
+
+// -----------------------------------------------------------------------
+//  Utility helpers
+// -----------------------------------------------------------------------
+
+// Clamp x into [lo, hi]. Used everywhere positions are computed because
+// guests/waiters must never escape the room rectangle.
+const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+
+// Euclidean distance between two 2-D points expressed as {x,y}. Used by
+// movement code, the layout cost function, and the waiter routing logic
+// where we want to deliver drinks to the table whose centroid is nearest.
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
+// Linear interpolation, with a clamped t. We use this for smooth pacing
+// of the waiter when carrying drinks rather than purely linear movement.
+const lerp = (a, b, t) => a + (b - a) * Math.max(0, Math.min(1, t));
+
+// Seeded PRNG (Mulberry32). When unseed is called, falls back to Math.random.
+let _rng = Math.random;
+
+// Mulberry32 implementation: deterministic PRNG from a 32-bit seed.
+function mulberry32(a) {
+  return function() {
+    a |= 0; a = a + 0x6d2b79f5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  }
+}
+
+// Set the PRNG seed. If seed is null/undefined, use Math.random (non-deterministic).
+function setSeed(seed) {
+  if (seed == null) {
+    _rng = Math.random;
+  } else {
+    _rng = mulberry32(seed);
+  }
+}
+
+// Random integer in [lo, hi] inclusive. Uses the seeded _rng.
+const rnd = (lo, hi) => lo + Math.floor(_rng() * (hi - lo + 1));
+
+// Random float in [lo, hi). Used for jitter on agent target positions so
+// guests don't pile up on a single pixel at their seats.
+const rndf = (lo, hi) => lo + _rng() * (hi - lo);
+
+// Shuffle in place via Fisher-Yates. Used when scheduling waiter trips
+// so that no single waiter monopolizes a corner of the room.
+function shuffle(a) {
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(_rng() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+// Pick one element at random from an array. Returns undefined if empty.
+const pick = (a) => a.length ? a[Math.floor(_rng() * a.length)] : undefined;
+
+// AABB overlap test inflated by `pad`. The layout optimizer uses this to
+// reject candidate tables that would intersect with already-placed
+// furniture, the bar zone, or the entrance corridor. Padding represents
+// the minimum corridor / chair clearance.
+function rectOverlap(a, b, pad = 0) {
+  return !(a.x + a.w + pad < b.x ||
+           b.x + b.w + pad < a.x ||
+           a.y + a.h + pad < b.y ||
+           b.y + b.h + pad < a.y);
+}
+
+// -----------------------------------------------------------------------
+//  PathNavigator — grid A* over the restaurant floor
+// -----------------------------------------------------------------------
+//  This navigator is intentionally simple and inspectable. The long-term
+//  idea behind this prototype is that a future ML layout optimizer can use
+//  real walkable-distance costs instead of naive straight-line distance.
+//  A* gives the simulation a better physical model without adding any
+//  external library or turning the demo into a full game engine.
+class PathNavigator {
+  constructor(width, height, tables, bar, userObstacles = []) {
+    this.width = width;
+    this.height = height;
+    this.cell = 18;                         // coarse enough for speed, fine enough for corridors
+    this.cols = Math.ceil(width / this.cell);
+    this.rows = Math.ceil(height / this.cell);
+    this.blocked = new Set();
+    this.obstacles = [];
+    this._buildObstacles(tables, bar, userObstacles);
+    this._rasterize();
+  }
+
+  // Furniture is expanded slightly so agents don't clip visually through
+  // rounded table edges or chair dots. The bar surface is also blocked,
+  // but its dock point remains outside the blocked area so waiters and
+  // impatient guests can still queue beside it. User-placed obstacles are
+  // treated like furniture: agents must route around them.
+  _buildObstacles(tables, bar, userObstacles) {
+    for (const t of tables) {
+      const r = t.rect(); // AABB accounts for rotation
+      this.obstacles.push({ x: r.x - 8, y: r.y - 8, w: r.w + 16, h: r.h + 16, kind: "table" });
+      for (const c of t.chairs) {
+        this.obstacles.push({ x: c.x - 11, y: c.y - 11, w: 22, h: 22, kind: "chair" });
+      }
+    }
+    this.obstacles.push({ x: bar.x - 4, y: bar.y - 4, w: bar.w + 8, h: bar.h + 8, kind: "bar" });
+    for (const o of userObstacles) {
+      this.obstacles.push({ x: o.x - 4, y: o.y - 4, w: o.w + 8, h: o.h + 8, kind: "obstacle" });
+    }
+  }
+
+  // Convert the continuous obstacle rectangles into blocked grid cells.
+  // A cell is considered blocked when its centre falls inside an inflated
+  // obstacle. This is conservative and keeps the walking lanes visibly
+  // clear even when agents have a non-zero radius.
+  _rasterize() {
+    for (let y = 0; y < this.rows; y++) {
+      for (let x = 0; x < this.cols; x++) {
+        const p = this.cellToPoint(x, y);
+        if (this.obstacles.some(o => p.x >= o.x && p.x <= o.x + o.w && p.y >= o.y && p.y <= o.y + o.h)) {
+          this.blocked.add(this.key(x, y));
+        }
+      }
+    }
+  }
+
+  key(x, y) { return x + "," + y; }
+  inBounds(x, y) { return x >= 0 && y >= 0 && x < this.cols && y < this.rows; }
+  cellToPoint(x, y) { return { x: x * this.cell + this.cell / 2, y: y * this.cell + this.cell / 2 }; }
+  pointToCell(p) {
+    return {
+      x: clamp(Math.floor(p.x / this.cell), 0, this.cols - 1),
+      y: clamp(Math.floor(p.y / this.cell), 0, this.rows - 1),
+    };
+  }
+  isBlocked(x, y) { return this.blocked.has(this.key(x, y)); }
+
+  // Destination cells are allowed to be inside a chair because seated
+  // guests literally walk to the chair point. Start cells are also allowed
+  // because an agent can begin beside/inside a chair after sitting.
+  walkable(x, y, start, goal) {
+    if (!this.inBounds(x, y)) return false;
+    if (x === start.x && y === start.y) return true;
+    if (x === goal.x && y === goal.y) return true;
+    return !this.isBlocked(x, y);
+  }
+
+  // For service points and bar queues we sometimes need a nearby open
+  // coordinate. This scans rings around the target cell and returns the
+  // first cell centre that is not blocked by furniture.
+  nearestOpenPoint(point, radiusCells = 4) {
+    const c = this.pointToCell(point);
+    if (!this.isBlocked(c.x, c.y)) return point;
+    for (let r = 1; r <= radiusCells; r++) {
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          if (Math.abs(dx) !== r && Math.abs(dy) !== r) continue;
+          const x = c.x + dx, y = c.y + dy;
+          if (this.inBounds(x, y) && !this.isBlocked(x, y)) return this.cellToPoint(x, y);
+        }
+      }
+    }
+    return point;
+  }
+
+  // A* search with 8-way movement. Diagonal steps are disallowed when they
+  // would cut through the corner of two blocked orthogonal cells, which is
+  // the usual reason sprites appear to squeeze through furniture corners.
+  findPath(from, to) {
+    const start = this.pointToCell(from);
+    const goal = this.pointToCell(to);
+    const open = new Map();
+    const came = new Map();
+    const gScore = new Map();
+    const fScore = new Map();
+    const startKey = this.key(start.x, start.y);
+    open.set(startKey, start);
+    gScore.set(startKey, 0);
+    fScore.set(startKey, Math.hypot(goal.x - start.x, goal.y - start.y));
+
+    while (open.size) {
+      let currentKey = null, current = null, best = Infinity;
+      for (const [k, v] of open) {
+        const f = fScore.get(k) ?? Infinity;
+        if (f < best) { best = f; currentKey = k; current = v; }
+      }
+      if (current.x === goal.x && current.y === goal.y) {
+        return this._reconstruct(came, currentKey, to);
+      }
+      open.delete(currentKey);
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue;
+          const nx = current.x + dx, ny = current.y + dy;
+          if (!this.walkable(nx, ny, start, goal)) continue;
+          if (dx !== 0 && dy !== 0) {
+            if (!this.walkable(current.x + dx, current.y, start, goal)) continue;
+            if (!this.walkable(current.x, current.y + dy, start, goal)) continue;
+          }
+          const nk = this.key(nx, ny);
+          const stepCost = dx !== 0 && dy !== 0 ? 1.414 : 1;
+          const tentative = (gScore.get(currentKey) ?? Infinity) + stepCost;
+          if (tentative < (gScore.get(nk) ?? Infinity)) {
+            came.set(nk, currentKey);
+            gScore.set(nk, tentative);
+            fScore.set(nk, tentative + Math.hypot(goal.x - nx, goal.y - ny));
+            open.set(nk, { x: nx, y: ny });
+          }
+        }
+      }
+    }
+    return [to]; // graceful fallback for very dense layouts
+  }
+
+  // Collapse the grid-cell chain into waypoints, keeping only turns. This
+  // avoids the robotic "centre of every cell" look while still respecting
+  // every obstacle that A* planned around.
+  _reconstruct(came, currentKey, exactGoal) {
+    const keys = [currentKey];
+    while (came.has(currentKey)) {
+      currentKey = came.get(currentKey);
+      keys.push(currentKey);
+    }
+    keys.reverse();
+    const pts = keys.map(k => {
+      const [x, y] = k.split(",").map(Number);
+      return this.cellToPoint(x, y);
+    });
+    const compressed = [];
+    let lastDir = null;
+    for (let i = 1; i < pts.length; i++) {
+      const dir = {
+        x: Math.sign(pts[i].x - pts[i - 1].x),
+        y: Math.sign(pts[i].y - pts[i - 1].y),
+      };
+      if (!lastDir || dir.x !== lastDir.x || dir.y !== lastDir.y) compressed.push(pts[i - 1]);
+      lastDir = dir;
+    }
+    compressed.push(exactGoal);
+    return compressed.slice(1);
+  }
+}
+
+// -----------------------------------------------------------------------
+//  Table — a furniture unit (table + chairs placed as one rigid block)
+// -----------------------------------------------------------------------
+//  Each Table owns its bounding rectangle (the rounded surface) and a
+//  list of chair anchor points that guests will target when seated.
+//  Chairs are laid out around the perimeter so that 2/4/6 seat tables
+//  produce visually distinct silhouettes on the canvas.
+class Table {
+  constructor(id, size, x, y, rotation = 0) {
+    this.id = id;
+    this.size = size;                // "small" | "medium" | "large" | "custom"
+    this.rotation = rotation;        // degrees — any value, applied as canvas rotate
+    const _def = size === "custom" ? null : getTableTypeDef(size);
+    const _cl  = _def && _def.chairs_local && _def.chairs_local.length > 0 ? _def.chairs_local : null;
+    this.seats = _cl ? _cl.length : (_def ? _def.seats : 6);
+    this.w     = _def ? _def.w     : 110;
+    this.h     = _def ? _def.h     : 70;
+    this.shape = _def ? (_def.shape || "rect") : "rect";
+    this.x = x; this.y = y;
+    this.chairs = this.computeChairs();
+    this.guests = [];
+    this.ordered = false;
+    this.orderTakenAt = -1;
+    this.drinksDelivered = 0;
+  }
+
+  // Factory for user-drawn tables (arbitrary size, user-placed chairs, rect or circle).
+  static createCustom(id, shape, x, y, w, h, chairsWorld, rotation = 0) {
+    const t = new Table(id, "custom", x, y, rotation);
+    t.shape = shape;
+    t.w = w; t.h = h;
+    t.chairs = chairsWorld.slice();
+    t.seats = chairsWorld.length;
+    return t;
+  }
+
+  centre() { return { x: this.x + this.w / 2, y: this.y + this.h / 2 }; }
+
+  // AABB of the rotated rectangle — used for collision checks and pathfinding.
+  rect() {
+    const cx = this.x + this.w / 2, cy = this.y + this.h / 2;
+    const rad = this.rotation * Math.PI / 180;
+    const cos = Math.abs(Math.cos(rad)), sin = Math.abs(Math.sin(rad));
+    const bw = this.w * cos + this.h * sin;
+    const bh = this.w * sin + this.h * cos;
+    return { x: cx - bw / 2, y: cy - bh / 2, w: bw, h: bh };
+  }
+
+  // Chair anchors in world space — computed via rotation matrix so that
+  // rotating a table also rotates the chair positions around its centre.
+  computeChairs() {
+    const cx = this.x + this.w / 2, cy = this.y + this.h / 2;
+    const rad0 = this.rotation * Math.PI / 180;
+    const cos0 = Math.cos(rad0), sin0 = Math.sin(rad0);
+    // Use custom chair layout if stored in the type definition.
+    if (this.size !== "custom") {
+      const _d = getTableTypeDef(this.size);
+      if (_d && _d.chairs_local && _d.chairs_local.length > 0) {
+        return _d.chairs_local.map(p => ({
+          x: cx + p.dx * cos0 - p.dy * sin0,
+          y: cy + p.dx * sin0 + p.dy * cos0,
+        }));
+      }
+    }
+    const margin = 14;
+    const n = this.seats;
+    let local = [];
+    if (this.shape === "circle") {
+      for (let i = 0; i < n; i++) {
+        const angle = -Math.PI / 2 + (i * 2 * Math.PI) / n;
+        local.push({
+          x: (this.w / 2 + margin) * Math.cos(angle),
+          y: (this.w / 2 + margin) * Math.sin(angle),
+        });
+      }
+    } else {
+      const top = Math.ceil(n / 2), bottom = Math.floor(n / 2);
+      const hy = this.h / 2 + margin;
+      for (let i = 0; i < top; i++) {
+        const t = top > 1 ? i / (top - 1) : 0.5;
+        local.push({ x: (t - 0.5) * this.w * 0.8, y: -hy });
+      }
+      for (let i = 0; i < bottom; i++) {
+        const t = bottom > 1 ? i / (bottom - 1) : 0.5;
+        local.push({ x: (t - 0.5) * this.w * 0.8, y: hy });
+      }
+    }
+    return local.map(p => ({
+      x: cx + p.x * cos0 - p.y * sin0,
+      y: cy + p.x * sin0 + p.y * cos0,
+    }));
+  }
+
+  reserveChair() {
+    if (this.guests.length >= this.seats) return undefined;
+    const idx = this.guests.length;
+    return { idx, point: this.chairs[idx] };
+  }
+
+  draw(ctx) {
+    const cx = this.x + this.w / 2, cy = this.y + this.h / 2;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(this.rotation * Math.PI / 180);
+    // Shadow
+    ctx.fillStyle = "rgba(0,0,0,0.4)";
+    if (this.shape === "circle") {
+      ctx.beginPath(); ctx.arc(2, 3, this.w / 2, 0, Math.PI * 2); ctx.fill();
+    } else {
+      roundRect(ctx, -this.w / 2 + 2, -this.h / 2 + 3, this.w, this.h, 8); ctx.fill();
+    }
+    // Surface
+    ctx.fillStyle = this.size === "small" ? "#3a2a1a" : this.size === "medium" ? "#4a3320" : "#5a3d24";
+    ctx.strokeStyle = "rgba(255,255,255,0.06)";
+    ctx.lineWidth = 1;
+    if (this.shape === "circle") {
+      ctx.beginPath(); ctx.arc(0, 0, this.w / 2, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    } else {
+      roundRect(ctx, -this.w / 2, -this.h / 2, this.w, this.h, 8); ctx.fill(); ctx.stroke();
+    }
+    ctx.restore();
+    // Chairs are already in world space from computeChairs() — draw directly.
+    for (let i = 0; i < this.chairs.length; i++) {
+      const c = this.chairs[i];
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, 5, 0, Math.PI * 2);
+      ctx.fillStyle = i < this.guests.length ? "#5a3d24" : "rgba(255,255,255,0.15)";
+      ctx.fill();
+    }
+  }
+}
+
+// -----------------------------------------------------------------------
+//  Guest — an agent driven by a small state machine
+// -----------------------------------------------------------------------
+//  Guest states encode "what the agent is doing right now":
+//    WALKING       - heading to an assigned chair from the entrance
+//    SEATED        - just sat down; ready to order
+//    WAITING       - ordered, awaiting drinks
+//    DRINKING      - drink delivered; consuming for a while
+//    SOCIALIZING   - quick visit to a neighbour table, then return
+//    TOILET        - off-table excursion (origin is preserved for return)
+//    BAR           - impatient: gave up waiting and stomped to the bar
+//    LEAVING       - heading to the exit; will be removed when off-screen
+class Guest {
+  constructor(id, spawn) {
+    this.id = id;
+    this.x = spawn.x; this.y = spawn.y;
+    // Random base speed (px/sec). The actual speed gets scaled at update
+    // time by the crowd-density modifier so packed corridors feel slower.
+    this.speed = rndf(55, 75);
+    this.r = 7;                          // render radius
+    this.state = "WALKING";
+    this.target = null;                  // current move target (or null)
+    this.path = [];                       // A* waypoints around tables/chairs
+    this.table = null;                   // assigned table reference
+    this.chairIdx = -1;                  // chair index inside the table
+    this.seatPoint = null;               // canonical seat position
+    this.timer = 0;                      // seconds left in current state
+    this.waitStart = -1;                 // sim time when WAITING began
+    this.waitedFor = 0;                  // total seconds spent waiting
+    this.served = false;                 // has the waiter delivered yet?
+    this.impatient = false;              // counted as impatient already?
+    this.exitTarget = null;              // cached exit point for LEAVING
+    this.savedSeat = null;               // remembers seat during excursions
+    this.totalWait = 0;                  // accumulated wait time (metrics)
+    this.drinksConsumed = 0;             // drinks finished so far
+    this.drinksPlanned = 0;              // total planned for the party
+    this.nextDrinkAt = 0;                // sim time to order next drink
+    this.plannedToiletTimes = [];        // scheduled toilet visit times
+    this.arrivalSimTime = 0;             // sim time when guest arrived
+    this.exitScheduled = false;          // has exit been scheduled?
+    this.savedState = null;              // state before toilet/excursion
+  }
+
+  // Mood colour for the current state. Encodes the state in a single
+  // glance — green = happy, yellow = patient waiting, red = impatient.
+  colour() {
+    switch (this.state) {
+      case "SEATED":      return "#6ad17a";
+      case "WAITING":     return "#f1c14a";
+      case "BAR":         return "#ef5454";
+      case "DRINKING":    return "#7cc3ff";
+      case "SOCIALIZING": return "#c084fc";
+      case "TOILET":      return "#a0a0a0";
+      case "LEAVING":     return "#888893";
+      default:            return "#cfcfd6"; // WALKING
+    }
+  }
+
+  // Move along the current A* path at the (crowd-adjusted) speed and
+  // return true only when the final waypoint has been reached. The target
+  // field still stores the immediate waypoint so drawing/debugging stays
+  // simple, while `path` keeps the remaining route.
+  step(dt, speedScale) {
+    if (!this.target && this.path.length) this.target = this.path.shift();
+    if (!this.target) return true;
+    const dx = this.target.x - this.x;
+    const dy = this.target.y - this.y;
+    const d = Math.hypot(dx, dy);
+    if (d < 1.5) {
+      if (this.path.length) { this.target = this.path.shift(); return false; }
+      return true;
+    }
+    const v = this.speed * speedScale * dt;
+    if (v >= d) {
+      this.x = this.target.x; this.y = this.target.y;
+      if (this.path.length) { this.target = this.path.shift(); return false; }
+      return true;
+    }
+    this.x += (dx / d) * v; this.y += (dy / d) * v; return false;
+  }
+
+  // Render as a filled circle outlined with a subtle ring. The ring is
+  // brighter for impatient guests so they pop against the room.
+  draw(ctx) {
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.r, 0, Math.PI * 2);
+    ctx.fillStyle = this.colour();
+    ctx.fill();
+    ctx.lineWidth = 1.2;
+    ctx.strokeStyle = this.state === "BAR" ? "#ffffff" : "rgba(0,0,0,0.4)";
+    ctx.stroke();
+  }
+}
+
+// -----------------------------------------------------------------------
+//  Waiter — task-driven agent with carry capacity and routing
+// -----------------------------------------------------------------------
+//  Waiters never socialize. They cycle through:
+//    IDLE              - no task; scanning for orders to take or trays
+//                        to deliver
+//    WALKING_TO_TABLE  - en route to take an order at a specific table
+//    TAKING_ORDER      - paused at the table for a brief moment
+//    WALKING_TO_BAR    - returning to the bar to collect drinks
+//    COLLECTING_DRINKS - paused at the bar while loading the tray
+//    SERVING           - en route to the next table in the delivery plan
+//
+//  The serving plan is a list of table IDs, sorted by nearest-first from
+//  the waiter's current position at the time the trip begins.
+class Waiter {
+  constructor(id, home, colour) {
+    this.id = id;
+    this.x = home.x; this.y = home.y;
+    this.home = home;                   // bar pickup point
+    this.colour = colour;
+    this.speed = rndf(85, 105);         // px/sec base
+    this.state = "IDLE";
+    this.target = null;
+    this.path = [];                      // A* waypoints around tables/chairs
+    this.targetTable = null;            // table reference, when relevant
+    this.servePlan = [];                // queue of table IDs to serve
+    this.carrying = 0;                  // drinks currently on tray
+    this.capacity = 8;                  // task spec: max 8 drinks
+    this.timer = 0;                     // dwell timer for ORDER/COLLECT
+    this.distance = 0;                  // total px walked (metric)
+  }
+
+  // Identical path-following integration to Guest, with distance
+  // accumulation so the metrics panel can show how far waiters travel.
+  step(dt, speedScale) {
+    if (!this.target && this.path.length) this.target = this.path.shift();
+    if (!this.target) return true;
+    const dx = this.target.x - this.x;
+    const dy = this.target.y - this.y;
+    const d = Math.hypot(dx, dy);
+    if (d < 1.5) {
+      if (this.path.length) { this.target = this.path.shift(); return false; }
+      return true;
+    }
+    const v = this.speed * speedScale * dt;
+    const m = Math.min(v, d);
+    this.distance += m;
+    this.x += (dx / d) * m; this.y += (dy / d) * m;
+    if (v >= d && this.path.length) { this.target = this.path.shift(); return false; }
+    return v >= d;
+  }
+
+  // Square render with a coloured fill. Carrying state shows a tiny
+  // counter so you can see the tray fill up — useful for debugging the
+  // capacity logic but also a nice piece of visual storytelling.
+  draw(ctx) {
+    ctx.fillStyle = "rgba(0,0,0,0.4)";
+    ctx.fillRect(this.x - 8, this.y - 7, 16, 16);
+    ctx.fillStyle = this.colour;
+    ctx.fillRect(this.x - 9, this.y - 9, 16, 16);
+    ctx.strokeStyle = "rgba(255,255,255,0.25)";
+    ctx.strokeRect(this.x - 9, this.y - 9, 16, 16);
+    if (this.carrying > 0) {
+      ctx.fillStyle = "#0a0a0f";
+      ctx.font = "10px ui-monospace, monospace";
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText(String(this.carrying), this.x - 1, this.y - 1);
+    }
+  }
+}
+
+// -----------------------------------------------------------------------
+//  Rounded-rectangle helper (Canvas 2D has no built-in primitive for it
+//  before recent specs, so we provide a portable polyfill).
+// -----------------------------------------------------------------------
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);     ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r); ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);     ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);         ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+// -----------------------------------------------------------------------
+//  SimulationEngine — owns the world and the animation loop
+// -----------------------------------------------------------------------
+class SimulationEngine {
+  constructor(canvas) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext("2d");
+    this.running = false;
+    this.paused = false;
+    this.lastTs = 0;
+    this.speedMul = 2;
+    this.simTime = 0;
+    this.runIndex = 0;
+    this.bestScore = -Infinity;
+    this.config = null;
+    this.seed = null;
+    // Pre-allocated colour pool for waiters (deterministic, readable).
+    this.waiterColours = ["#f5a623", "#7cc3ff", "#c084fc", "#6ad17a", "#ef5454", "#f1c14a"];
+
+    // Metrics container is owned here so the render layer can paint the
+    // numbers directly without snapshotting.
+    this.metrics = {
+      totalServed: 0, totalLeft: 0, impatient: 0,
+      waitSum: 0, waitSamples: 0, waiterDist: 0, score: 0,
+    };
+
+    // Bind the loop once so we keep a stable function identity for the
+    // requestAnimationFrame callback.
+    this._loop = this._loop.bind(this);
+
+    // Store the start time to track elapsed simulation time for run history.
+    this._runStartTime = null;
+
+    // User-placed layout constraints. Persisted across runs and editable
+    // via the layout editor UI.
+    this.fixedTables = [];                  // [{ size, x, y, rotation }]
+    this.drawnTables = [];                  // [{ shape, x, y, w, h, rotation, chairs_local }]
+    this.obstacles = [];                    // [{ x, y, w, h }]
+    // Optional ephemeral overlay drawn by the editor (drag preview).
+    this.editorPreview = null;
+    this.chairEditTarget = null;            // pending drawn table in chair-placement mode
+    this.showResizeHandles = false;
+    this.layoutError = null;
+  }
+
+  // Begin a brand-new simulation: read the UI, regenerate the layout
+  // with the optimizer, spawn fresh agents, reset metrics, kick the
+  // animation loop if it's not already running.
+  start(config) {
+    // Save previous run if it had meaningful data, then start fresh.
+    this._saveCurrentRun();
+
+    // Set seed: if config.seed is not provided, generate a random one.
+    const seed = config.seed != null ? config.seed : Math.floor(Math.random() * 1e9);
+    setSeed(seed);
+    this.seed = seed;
+
+    this.config = config;
+    this.canvas.width = config.roomW;
+    this.canvas.height = config.roomH;
+
+    // Set party type and duration
+    this.partyType = PARTY_TYPES[config.partyType] || PARTY_TYPES.buffet;
+    this.partyEndSimTime = this.partyType.durationSec;
+
+    // Reset state for a clean run; we deliberately preserve bestScore
+    // across runs because that's part of the headline metric.
+    this.simTime = 0;
+    this.runIndex += 1;
+    this.guests = [];
+    this.waiters = [];
+    this.metrics = {
+      totalServed: 0, totalLeft: 0, impatient: 0,
+      waitSum: 0, waitSamples: 0, waiterDist: 0, score: 0,
+    };
+    this.spawnQueue = [];               // pre-baked guest spawn schedule
+
+    this.entrance = { x: 48, y: config.roomH - 54 };
+    this.exit = this.entrance;          // same door for in and out
+    // The bar is a fixed wide pickup zone on the right wall — drinks
+    // come off the bar within this rectangle and waiters dock at its
+    // midpoint.
+    this.bar = {
+      x: config.roomW - 90, y: 50,
+      w: 70, h: config.roomH - 100,
+      dock: { x: config.roomW - 110, y: 80 },
+    };
+
+    // Generate a layout. Retry up to 5 times — the random sampler can
+    // fail one attempt even when valid positions exist.
+    const MAX_LAYOUT_TRIES = 5;
+    for (let _try = 0; _try < MAX_LAYOUT_TRIES; _try++) {
+      this.tables = this.generateLayout();
+      if (!this.layoutError) break;
+    }
+
+    // Abort only if every attempt failed.
+    if (this.layoutError) {
+      this.running = false;
+      return;
+    }
+
+    // Build the navigation mesh after furniture exists. The navigator is
+    // regenerated every run because a new table layout means a new blocked
+    // grid. Both guests and waiters use this same map, which keeps their
+    // movement constraints consistent.
+    this.navigator = new PathNavigator(config.roomW, config.roomH, this.tables, this.bar, this.obstacles);
+
+    // Spawn waiters at the bar dock with distinct colours.
+    for (let i = 0; i < config.waiters; i++) {
+      this.waiters.push(new Waiter(i, { x: this.bar.dock.x, y: this.bar.dock.y + i * 22 }, this.waiterColours[i % this.waiterColours.length]));
+    }
+
+    // Stagger guest arrivals over partyType.arrivalWindowSec.
+    for (let i = 0; i < config.guests; i++) {
+      this.spawnQueue.push({ at: i * (this.partyType.arrivalWindowSec / Math.max(1, config.guests)) + rndf(0, 30) });
+    }
+
+    this._runStartTime = Date.now();
+    this.running = true;
+    this.paused = false;
+    if (!this._rafActive) {
+      this._rafActive = true;
+      this.lastTs = performance.now();
+      requestAnimationFrame(this._loop);
+    }
+  }
+
+  // ---------------------------------------------------------------
+  //  Layout optimizer
+  //
+  //  Strategy: place tables one at a time. For each table generate K
+  //  random candidate positions inside the usable floor area. Score
+  //  each candidate via cost(pos) and pick the one with the lowest
+  //  score that doesn't collide. The cost terms are:
+  //
+  //    +  travel: distance from the bar dock (waiters' anchor) — we
+  //       prefer tables that are easier to serve.
+  //    +  entrance penalty: tables too close to the entrance squeeze
+  //       the corridor; we penalize them.
+  //    +  grouping bonus: a table placed near another table of the
+  //       *same* size gets a small discount, encouraging clusters.
+  //    +  corridor: penalty for being closer than the minimum gap to
+  //       any already-placed table (also enforced by the collision
+  //       reject, but this term smooths the score).
+  //
+  //  This is a one-shot greedy sampler — not optimal in any global
+  //  sense, but it produces visibly different layouts each run and a
+  //  monotonically improving best-score metric, which is the goal.
+  // ---------------------------------------------------------------
+  generateLayout() {
+    const { roomW, roomH, tSmall, tMedium, tLarge } = this.config;
+    // 50 px between table AABBs → ~22 px of clear floor between chair tips (chairs extend 14 px).
+    // Kept below 60 so dense rooms can still be fully packed.
+    const minCorridor = 50;
+    const placed = [];
+    let nextId = 0;
+
+    // Only 0° or 90° — 45° inflates AABBs by √2 and wastes too much floor area.
+    const runRotation = rnd(0, 1) * 90;
+
+    // Helper: build a Table from a user-drawn table descriptor.
+    const buildDrawnTable = (id, dt) => {
+      const rad = (dt.rotation || 0) * Math.PI / 180;
+      const cos = Math.cos(rad), sin = Math.sin(rad);
+      const cx = dt.x + dt.w / 2, cy = dt.y + dt.h / 2;
+      const worldChairs = (dt.chairs_local || []).map(ch => ({
+        x: cx + ch.dx * cos - ch.dy * sin,
+        y: cy + ch.dx * sin + ch.dy * cos,
+      }));
+      return Table.createCustom(id, dt.shape || "rect", dt.x, dt.y, dt.w, dt.h, worldChairs, dt.rotation || 0);
+    };
+
+    // Pre-place user-drawn tables (do not count against the mix budget).
+    for (const dt of this.drawnTables) {
+      const t = buildDrawnTable(nextId++, dt);
+      t.isFixed = true;
+      placed.push(t);
+    }
+
+    // Optimizer-forced layout: skip random placement entirely.
+    if (this.config.forcedLayout && this.config.forcedLayout.length > 0) {
+      for (const ft of this.config.forcedLayout) {
+        placed.push(new Table(nextId++, ft.size, ft.x, ft.y, ft.rotation || 0));
+      }
+      this.layoutError = null;
+      return placed;
+    }
+
+    // Pre-place fixed preset tables. They subtract from the mix budget.
+    const fixedBySize = { small: 0, medium: 0, large: 0 };
+    for (const ft of this.fixedTables) {
+      const t = new Table(nextId++, ft.size, ft.x, ft.y, ft.rotation || 0);
+      t.isFixed = true;
+      placed.push(t);
+      fixedBySize[ft.size]++;
+    }
+
+    const need = {
+      small:  Math.max(0, tSmall  - fixedBySize.small),
+      medium: Math.max(0, tMedium - fixedBySize.medium),
+      large:  Math.max(0, tLarge  - fixedBySize.large),
+    };
+    const declare = [];
+    for (let i = 0; i < need.large;  i++) declare.push("large");
+    for (let i = 0; i < need.medium; i++) declare.push("medium");
+    for (let i = 0; i < need.small;  i++) declare.push("small");
+    // Combined moveable tables (comb1–comb4) supplied via config.tableGroups
+    for (const g of (this.config.tableGroups || [])) {
+      for (let i = 0; i < g.count; i++) declare.push(g.type);
+    }
+    shuffle(declare);
+
+    const forbidden = [
+      { x: 0, y: roomH - 90, w: 110, h: 90 },
+      { x: roomW - 100, y: 30, w: 100, h: roomH - 60 },
+      ...this.obstacles.map(o => ({ x: o.x, y: o.y, w: o.w, h: o.h })),
+    ];
+
+    for (const size of declare) {
+      // Probe table at origin — compute AABB to derive valid placement bounds.
+      const probe = new Table(-1, size, 0, 0, runRotation);
+      probe.x = 0; probe.y = 0;
+      const aabb0 = probe.rect();
+      // aabb0.x / aabb0.y are the AABB offsets when probe is at (0,0).
+      // Derive placement bounds so the AABB stays wallMargin inside the room.
+      const wallMargin = 20;
+      const xMin = Math.ceil(wallMargin - aabb0.x);
+      const xMax = Math.floor(roomW - (aabb0.x + aabb0.w) - wallMargin);
+      const yMin = Math.ceil(wallMargin - aabb0.y);
+      const yMax = Math.floor(roomH - (aabb0.y + aabb0.h) - wallMargin);
+
+      let best = null;
+      let bestScore = Infinity;
+
+      for (let k = 0; k < 360; k++) {
+        const x = rnd(xMin, xMax);
+        const y = rnd(yMin, yMax);
+        probe.x = x; probe.y = y;
+        const r = probe.rect(); // rotated AABB
+
+        let bad = false;
+        for (const f of forbidden) if (rectOverlap(r, f, minCorridor / 2)) { bad = true; break; }
+        if (bad) continue;
+        for (const p of placed) if (rectOverlap(r, p.rect(), minCorridor)) { bad = true; break; }
+        if (bad) continue;
+
+        const c = { x: x + probe.w / 2, y: y + probe.h / 2 };
+        let score = dist(c, this.bar.dock) * 1.0;
+        score -= Math.min(120, dist(c, this.entrance)) * 0.2;
+        for (const p of placed) {
+          if (p.size === size) score -= 20; // grouping bonus
+          // Alignment bonus: prefer all tables pointing the same way.
+          if (p.rotation !== undefined && Math.abs(p.rotation % 180 - runRotation % 180) < 1) score -= 40;
+        }
+        if (score < bestScore) { bestScore = score; best = { x, y }; }
+      }
+
+      if (!best) {
+        outer:
+        for (let gy = yMin; gy <= yMax; gy += 20) {
+          for (let gx = xMin; gx <= xMax; gx += 20) {
+            probe.x = gx; probe.y = gy;
+            const r = probe.rect();
+            let bad = false;
+            for (const f of forbidden) if (rectOverlap(r, f, minCorridor / 2)) { bad = true; break; }
+            if (bad) continue;
+            for (const p of placed) if (rectOverlap(r, p.rect(), minCorridor)) { bad = true; break; }
+            if (!bad) { best = { x: gx, y: gy }; break outer; }
+          }
+        }
+      }
+      if (best) placed.push(new Table(nextId++, size, best.x, best.y, runRotation));
+    }
+
+    // Check whether every requested standard table was actually placed.
+    const expectedGroups   = (this.config.tableGroups || []).reduce((s, g) => s + g.count, 0);
+    const expectedStandard = need.small + need.medium + need.large + expectedGroups;
+    const placedStandard = placed.length - this.fixedTables.length - this.drawnTables.length;
+    if (placedStandard < expectedStandard) {
+      this.layoutError = `Niet genoeg ruimte: ${placedStandard} van de ${expectedStandard} vrij te plaatsen tafels konden worden geplaatst. Vergroot de ruimte of verlaag het aantal tafels.`;
+    } else {
+      this.layoutError = null;
+    }
+    return placed;
+  }
+
+  // Compute an instantaneous "efficiency score" for the metrics panel.
+  // Higher is better: rewards served drinks and seated guests, penalizes
+  // accumulated wait time, impatient guests, and total waiter distance.
+  // The shape of the score is empirical — tuned so a well-running setup
+  // settles around 100-300 and a poorly chosen mix drops below zero.
+  efficiencyScore() {
+    const m = this.metrics;
+    const avgWait = m.waitSamples ? m.waitSum / m.waitSamples : 0;
+    const served = m.totalServed;
+    const dist = m.waiterDist;
+    return Math.round(
+      served * 12
+      - avgWait * 3
+      - m.impatient * 25
+      - dist * 0.02
+    );
+  }
+
+  // Save the current run to localStorage if it has meaningful data.
+  _saveCurrentRun() {
+    // Only save if we have a config and either meaningful data or elapsed time.
+    if (!this.config || !this._runStartTime) return;
+    const elapsedSec = (Date.now() - this._runStartTime) / 1000;
+    if (this.metrics.totalServed === 0 && elapsedSec < 30) return;
+
+    const snapshot = {
+      runId: this.runIndex,
+      timestamp: new Date().toISOString(),
+      seed: this.seed,
+      config: {
+        roomW: this.config.roomW,
+        roomH: this.config.roomH,
+        guests: this.config.guests,
+        waiters: this.config.waiters,
+        tSmall: this.config.tSmall,
+        tMedium: this.config.tMedium,
+        tLarge: this.config.tLarge,
+        partyType: this.config.partyType,
+      },
+      metrics: {
+        score: this.metrics.score,
+        totalServed: this.metrics.totalServed,
+        totalLeft: this.metrics.totalLeft,
+        impatient: this.metrics.impatient,
+        avgWait: this.metrics.waitSamples ? this.metrics.waitSum / this.metrics.waitSamples : 0,
+        waiterDist: this.metrics.waiterDist,
+      },
+      tables: this.tables.map(t => ({ size: t.size, x: t.x, y: t.y, rotation: t.rotation, isFixed: !!t.isFixed })),
+      fixedTables: this.fixedTables.map(t => ({ size: t.size, x: t.x, y: t.y, rotation: t.rotation || 0 })),
+      drawnTables: this.drawnTables.slice(),
+      obstacles: this.obstacles.map(o => ({ x: o.x, y: o.y, w: o.w, h: o.h })),
+    };
+
+    try {
+      const runs = JSON.parse(localStorage.getItem("restaurantSim.runs") || "[]");
+      runs.push(snapshot);
+      // Keep at most 50 runs (FIFO).
+      if (runs.length > 50) runs.shift();
+      localStorage.setItem("restaurantSim.runs", JSON.stringify(runs));
+      updateRunHistoryList();
+    } catch (e) {
+      // Fail silently if localStorage is unavailable.
+    }
+  }
+
+  // Public toggles invoked from the UI buttons.
+  pause()  { this.paused = true;  }
+  resume() { this.paused = false; this.lastTs = performance.now(); }
+
+  // ---------------------------------------------------------------
+  //  Main loop
+  //
+  //  Real wall-clock dt is multiplied by `speedMul` to produce sim dt.
+  //  Pausing doesn't stop rAF (we still paint) but we set sim dt to 0,
+  //  which keeps the canvas redrawing in case the UI is resized.
+  // ---------------------------------------------------------------
+  _loop(ts) {
+    const wallDt = Math.min(0.05, (ts - this.lastTs) / 1000);
+    this.lastTs = ts;
+    const simDt = this.paused ? 0 : wallDt * this.speedMul;
+    this.simTime += simDt;
+    this._syncClockDisplay();
+
+    if (this.running) {
+      this._spawnGuests();
+      this._tickGuests(simDt);
+      this._tickWaiters(simDt);
+      this._tickPartyEnd(simDt);
+      if (this.simTime >= this.partyEndSimTime && this.guests.length === 0) {
+        this.running = false;
+      }
+    }
+    this._draw();
+    requestAnimationFrame(this._loop);
+  }
+
+  // Convert the simulation clock into hh:mm:ss format when hours > 0, else mm:ss.
+  // Both the canvas HUD and metrics panel call this helper so validation
+  // screenshots cannot catch them one refresh interval apart.
+  _clockText() {
+    const hh = Math.floor(this.simTime / 3600);
+    const mm = Math.floor((this.simTime % 3600) / 60).toString().padStart(2, "0");
+    const ss = Math.floor(this.simTime % 60).toString().padStart(2, "0");
+    if (hh > 0) return `${hh}:${mm}:${ss}`;
+    return `${mm}:${ss}`;
+  }
+
+  // Keep the visible metrics timer in lockstep with requestAnimationFrame.
+  // The rest of the metric panel still refreshes once per second, but time
+  // itself is cheap to update and should never appear stale beside the HUD.
+  _syncClockDisplay() {
+    const el = document.getElementById("mTime");
+    if (el) el.textContent = this._clockText();
+  }
+
+  // Release queued guests when their scheduled spawn time elapses. We
+  // assign each guest to a table with at least one free chair; if all
+  // tables are full, the guest waits at the entrance area (counts as
+  // WALKING but with a near-zero target — visually it forms a queue).
+  _spawnGuests() {
+    if (this.simTime > this.partyEndSimTime) { this.spawnQueue = []; return; }
+    while (this.spawnQueue.length && this.spawnQueue[0].at <= this.simTime) {
+      this.spawnQueue.shift();
+      const g = new Guest(this.guests.length, { x: this.entrance.x, y: this.entrance.y - rndf(0, 12) });
+      g.arrivalSimTime = this.simTime;
+      // Try to seat at a table with a free chair.
+      const free = this.tables.filter(t => t.guests.length < t.seats);
+      if (!free.length) {
+        // No seat — guest just hangs around the door and will leave.
+        this._routeAgent(g, { x: this.entrance.x + 40, y: this.entrance.y - 20 });
+        g.state = "WALKING";
+        g.exitTarget = this.exit;
+        g.timer = 12; // patience before walking out
+        this.guests.push(g);
+        continue;
+      }
+      const t = pick(free);
+      const res = t.reserveChair();
+      g.table = t;
+      g.chairIdx = res.idx;
+      g.seatPoint = { x: res.point.x, y: res.point.y };
+      this._routeGuestToSeat(g, g.seatPoint);
+      t.guests.push(g);
+      this.guests.push(g);
+    }
+  }
+
+  // Crowd-density modifier: count neighbours within `radius` and damp
+  // movement speed accordingly. This makes corridors feel congested
+  // when guests pile up and is the single most important reason to
+  // care about the layout corridor metric.
+  _crowdScale(agent) {
+    const radius = 32;
+    let n = 0;
+    for (const g of this.guests) {
+      if (g === agent) continue;
+      if (Math.abs(g.x - agent.x) < radius && Math.abs(g.y - agent.y) < radius) n++;
+    }
+    return clamp(1 - n * 0.06, 0.5, 1);
+  }
+
+  // Assign a pathfinding route to any moving agent. The immediate target
+  // becomes the first waypoint, while the rest of the route is stored in
+  // `path`. Every destination change goes through this helper so agents
+  // consistently respect tables, chairs, and the bar surface.
+  _routeAgent(agent, destination) {
+    if (!this.navigator) {
+      agent.target = destination;
+      agent.path = [];
+      return;
+    }
+    const safeDestination = this.navigator.nearestOpenPoint(destination, 5);
+    const path = this.navigator.findPath({ x: agent.x, y: agent.y }, safeDestination);
+    agent.path = path.slice();
+    agent.target = agent.path.shift() || safeDestination;
+  }
+
+  // Chair endpoints are the one exception to `nearestOpenPoint`: a chair
+  // is blocked for through-traffic, but the assigned diner must be able to
+  // end exactly at that chair. The pathfinder allows the goal cell, so the
+  // guest can sit without letting everyone else walk through the chair.
+  _routeGuestToSeat(guest, seatPoint) {
+    if (!this.navigator) {
+      guest.target = seatPoint;
+      guest.path = [];
+      return;
+    }
+    const path = this.navigator.findPath({ x: guest.x, y: guest.y }, seatPoint);
+    guest.path = path.slice();
+    guest.target = guest.path.shift() || seatPoint;
+  }
+
+  // Waiters should not stand in the middle of a table. Pick a service
+  // point just outside the table perimeter, preferring the candidate that
+  // is closest to the waiter's current position and not blocked by another
+  // furniture cell.
+  _servicePoint(table, from) {
+    const c = table.centre();
+    const gap = 26;
+    const candidates = [
+      { x: c.x, y: table.y - gap },
+      { x: c.x, y: table.y + table.h + gap },
+      { x: table.x - gap, y: c.y },
+      { x: table.x + table.w + gap, y: c.y },
+      { x: table.x - gap, y: table.y - gap },
+      { x: table.x + table.w + gap, y: table.y - gap },
+      { x: table.x - gap, y: table.y + table.h + gap },
+      { x: table.x + table.w + gap, y: table.y + table.h + gap },
+    ].map(p => ({
+      x: clamp(p.x, 16, this.canvas.width - 16),
+      y: clamp(p.y, 16, this.canvas.height - 16),
+    }));
+    const open = candidates.map(p => this.navigator ? this.navigator.nearestOpenPoint(p, 3) : p);
+    open.sort((a, b) => dist(a, from) - dist(b, from));
+    return open[0] || c;
+  }
+
+  // Compute time until next drink order. Accounts for first hour vs rest.
+  _nextDrinkInterval(guest) {
+    const elapsed = this.simTime - guest.arrivalSimTime;
+    let interval;
+    if (elapsed < 3600) {
+      // First hour: space drinks based on firstHourDrinks count.
+      interval = (3600 / this.partyType.firstHourDrinks) - rndf(180, 420);
+    } else {
+      // Subsequent hours: use perHourDrinksRange average.
+      const avg = (this.partyType.perHourDrinksRange[0] + this.partyType.perHourDrinksRange[1]) / 2;
+      interval = (3600 / avg);
+    }
+    interval += rndf(-120, 120);
+    return Math.max(60, interval);
+  }
+
+  // ---------------------------------------------------------------
+  //  Guest state machine
+  //
+  //  Each branch reads like a sentence: "if my target is reached and
+  //  I'm currently WALKING, sit down". Keeping each state's transition
+  //  rules together in one switch makes it easy to add new states
+  //  later (e.g. PAYING, COMPLAINING) without surgery elsewhere.
+  // ---------------------------------------------------------------
+  _tickGuests(dt) {
+    if (dt === 0) return;
+    for (let i = this.guests.length - 1; i >= 0; i--) {
+      const g = this.guests[i];
+      const arrived = g.step(dt, this._crowdScale(g));
+
+      // Accumulate waiting metric while in the WAITING/BAR states.
+      if (g.state === "WAITING" || g.state === "BAR") {
+        g.totalWait += dt;
+      }
+
+      switch (g.state) {
+        case "WALKING":
+          if (arrived) {
+            // Two flavours of WALKING: heading to a seat, or no-seat-loiter.
+            if (g.table) {
+              g.state = "SEATED"; g.timer = rndf(30, 90);
+              // First time seated: compute drink plan and toilet schedule.
+              if (g.drinksPlanned === 0) {
+                const stayDuration = Math.max(3600, this.partyEndSimTime - g.arrivalSimTime);
+                const hoursStaying = stayDuration / 3600;
+                const perHourAvg = (this.partyType.perHourDrinksRange[0] + this.partyType.perHourDrinksRange[1]) / 2;
+                const jitter = rndf(-0.3, 0.3);
+                g.drinksPlanned = Math.round(this.partyType.firstHourDrinks + (hoursStaying - 1) * perHourAvg + jitter);
+                g.drinksPlanned = Math.max(1, g.drinksPlanned);
+                // Schedule toilet visits.
+                const numToilets = Math.round(this.partyType.toiletVisitsAvg + rndf(-0.5, 0.5));
+                g.plannedToiletTimes = [];
+                for (let i = 0; i < numToilets; i++) {
+                  const frac = (i + rndf(0.3, 0.7)) / Math.max(1, numToilets);
+                  g.plannedToiletTimes.push(g.arrivalSimTime + frac * stayDuration);
+                }
+              }
+            } else {
+              g.timer -= dt;
+              if (g.timer <= 0) { g.state = "LEAVING"; this._routeAgent(g, this.exit); }
+            }
+          }
+          break;
+
+        case "SEATED":
+          g.timer -= dt;
+          if (g.timer <= 0) {
+            // Check if next toilet is due while in SEATED.
+            const nextToilet = g.plannedToiletTimes.length > 0 ? g.plannedToiletTimes[0] : Infinity;
+            if (this.simTime >= nextToilet) {
+              g.plannedToiletTimes.shift();
+              g.savedState = "SEATED";
+              g.state = "TOILET";
+              this._routeAgent(g, { x: this.canvas.width - 30, y: this.canvas.height - 30 });
+              g.timer = rndf(150, 210);
+            } else {
+              g.state = "WAITING";
+              g.waitStart = this.simTime;
+              g.table.ordered = true;
+            }
+          }
+          break;
+
+        case "WAITING":
+          // If the waiter delivered while we were here, transition to drinking.
+          if (g.served) {
+            g.state = "DRINKING";
+            g.timer = rndf(180, 420);
+            g.served = false;
+          } else if (this.simTime - g.waitStart > 600) {
+            // Too long — give up, walk to the bar, become impatient.
+            // Release the seat now so a fresh arrival can use it; the
+            // table will count this as a no-show for scoring purposes.
+            this._releaseSeat(g);
+            g.state = "BAR";
+            if (!g.impatient) { g.impatient = true; this.metrics.impatient++; }
+            this._routeAgent(g, {
+              x: this.bar.dock.x + rndf(-8, 8),
+              y: this.bar.dock.y + 60 + rndf(0, 80),
+            });
+            // Give the BAR state a short dwell timer (set to 0 here so
+            // it only starts ticking once the guest has actually walked
+            // up to the bar — see arrival branch below).
+            g.timer = 0;
+          }
+          break;
+
+        case "BAR":
+          // Wait until we've reached the bar, then sip and leave.
+          if (arrived) {
+            // First arrival: initialise a consumption timer (5-10 min sulking).
+            if (g.timer <= 0) g.timer = rndf(300, 600);
+            g.timer -= dt;
+            if (g.timer <= 0) {
+              this.metrics.totalLeft++;
+              this.metrics.waitSum += g.totalWait;
+              this.metrics.waitSamples++;
+              g.state = "LEAVING";
+              this._routeAgent(g, this.exit);
+            }
+          }
+          break;
+
+        case "DRINKING":
+          g.timer -= dt;
+          if (g.timer <= 0) {
+            g.drinksConsumed++;
+            // Check if done with drinks or party ended.
+            if (g.drinksConsumed >= g.drinksPlanned || this.simTime >= this.partyEndSimTime) {
+              this._releaseSeat(g);
+              this.metrics.totalLeft++;
+              this.metrics.waitSum += g.totalWait;
+              this.metrics.waitSamples++;
+              g.state = "LEAVING"; this._routeAgent(g, this.exit);
+            } else {
+              // Check for scheduled toilet before re-ordering.
+              const nextToilet = g.plannedToiletTimes.length > 0 ? g.plannedToiletTimes[0] : Infinity;
+              if (this.simTime >= nextToilet) {
+                g.plannedToiletTimes.shift();
+                g.savedState = "DRINKING";
+                g.state = "TOILET";
+                this._routeAgent(g, { x: this.canvas.width - 30, y: this.canvas.height - 30 });
+                g.timer = rndf(150, 210);
+              } else if (_rng() < this.partyType.socializeChance && this.tables.length > 1) {
+                // Socialize: visit a neighbour table briefly.
+                const others = this.tables.filter(t => t !== g.table);
+                const nb = others.reduce((best, t) =>
+                  !best || dist(t.centre(), g) < dist(best.centre(), g) ? t : best, null);
+                if (nb) {
+                  g.savedSeat = g.seatPoint;
+                  g.savedState = "DRINKING";
+                  g.state = "SOCIALIZING";
+                  this._routeAgent(g, this._servicePoint(nb, g));
+                  g.timer = rndf(180, 360);
+                } else {
+                  // Fallback: go to SEATED to wait for next drink.
+                  g.state = "SEATED";
+                  this._routeGuestToSeat(g, g.seatPoint);
+                  g.timer = this._nextDrinkInterval(g);
+                }
+              } else {
+                // Return to seat and wait for next drink.
+                g.state = "SEATED";
+                this._routeGuestToSeat(g, g.seatPoint);
+                g.timer = this._nextDrinkInterval(g);
+              }
+            }
+          }
+          break;
+
+        case "SOCIALIZING":
+        case "TOILET":
+          g.timer -= dt;
+          if (g.timer <= 0) {
+            g.savedSeat = null;
+            g.savedState = null;
+            if (g.drinksConsumed >= g.drinksPlanned || this.simTime >= this.partyEndSimTime) {
+              this._releaseSeat(g);
+              this.metrics.totalLeft++;
+              this.metrics.waitSum += g.totalWait;
+              this.metrics.waitSamples++;
+              g.state = "LEAVING";
+              this._routeAgent(g, this.exit);
+            } else {
+              g.state = "SEATED";
+              this._routeGuestToSeat(g, g.seatPoint);
+              g.timer = rndf(30, 90);
+            }
+          }
+          break;
+
+        case "LEAVING":
+          if (arrived) {
+            // Once at the exit, remove from world.
+            this.guests.splice(i, 1);
+          }
+          break;
+      }
+    }
+  }
+
+  // Remove a guest's reservation from its table so a future arrival
+  // can take the seat. Called whenever a guest transitions to LEAVING
+  // or storms off to the bar from WAITING.
+  _releaseSeat(g) {
+    if (!g.table) return;
+    const idx = g.table.guests.indexOf(g);
+    if (idx >= 0) g.table.guests.splice(idx, 1);
+    g.table = null;
+  }
+
+  // ---------------------------------------------------------------
+  //  Waiter state machine
+  //
+  //  IDLE: look for tables that have ordered but not been served.
+  //  If any exist, take the order at the nearest one. Then plan a
+  //  multi-table delivery run (up to capacity) and head to the bar.
+  // ---------------------------------------------------------------
+  _tickWaiters(dt) {
+    if (dt === 0) return;
+    for (const w of this.waiters) {
+      const arrived = w.step(dt, 1);
+      switch (w.state) {
+        case "IDLE": {
+          // Find a table that's ordered but not served and isn't
+          // already targeted by another waiter.
+          const claimed = new Set(this.waiters.map(o => o.targetTable && o.targetTable.id).filter(x => x != null));
+          const wanting = this.tables.filter(t =>
+            t.ordered &&
+            t.guests.some(g => g.state === "WAITING" && !g.served) &&
+            !claimed.has(t.id));
+          if (!wanting.length) break;
+          wanting.sort((a, b) => dist(a.centre(), w) - dist(b.centre(), w));
+          const t = wanting[0];
+          w.targetTable = t;
+          this._routeAgent(w, this._servicePoint(t, w));
+          w.state = "WALKING_TO_TABLE";
+          break;
+        }
+        case "WALKING_TO_TABLE":
+          if (arrived) { w.state = "TAKING_ORDER"; w.timer = 30; }
+          break;
+        case "TAKING_ORDER":
+          w.timer -= dt;
+          if (w.timer <= 0) {
+            const t = w.targetTable;
+            t.orderTakenAt = this.simTime;
+            // Build a multi-table serving plan: start with this table,
+            // then opportunistically chain other tables that have also
+            // ordered, up to carry capacity.
+            const wantingGuests = t.guests.filter(g => g.state === "WAITING" && !g.served);
+            const plan = [{ table: t, count: wantingGuests.length }];
+            let load = wantingGuests.length;
+            // Greedy nearest-first add-ons.
+            const remaining = this.tables.filter(o => o !== t && o.ordered && o.guests.some(g => g.state === "WAITING" && !g.served));
+            remaining.sort((a, b) => dist(a.centre(), t.centre()) - dist(b.centre(), t.centre()));
+            for (const o of remaining) {
+              const need = o.guests.filter(g => g.state === "WAITING" && !g.served).length;
+              if (load + need > w.capacity) continue;
+              load += need;
+              plan.push({ table: o, count: need });
+            }
+            w.servePlan = plan;
+            w.carrying = 0;
+            w.targetTable = null;
+            this._routeAgent(w, this.bar.dock);
+            w.state = "WALKING_TO_BAR";
+          }
+          break;
+        case "WALKING_TO_BAR":
+          if (arrived) { w.state = "COLLECTING_DRINKS"; w.timer = 45; }
+          break;
+        case "COLLECTING_DRINKS":
+          w.timer -= dt;
+          if (w.timer <= 0) {
+            w.carrying = w.servePlan.reduce((s, e) => s + e.count, 0);
+            // Sort plan by nearest-from-bar so the first hop is short.
+            w.servePlan.sort((a, b) => dist(a.table.centre(), w) - dist(b.table.centre(), w));
+            const first = w.servePlan[0];
+            if (!first) { w.state = "IDLE"; break; }
+            this._routeAgent(w, this._servicePoint(first.table, w));
+            w.state = "SERVING";
+          }
+          break;
+        case "SERVING":
+          if (arrived) {
+            // Deliver to all WAITING guests at this table.
+            const entry = w.servePlan.shift();
+            if (entry) {
+              for (const g of entry.table.guests) {
+                if (g.state === "WAITING" && !g.served) {
+                  g.served = true;
+                  w.carrying = Math.max(0, w.carrying - 1);
+                  this.metrics.totalServed++;
+                  entry.table.drinksDelivered++;
+                }
+              }
+              entry.table.ordered = entry.table.guests.some(x => x.state === "WAITING" && !x.served);
+            }
+            if (w.servePlan.length) {
+              // Re-sort to nearest-next for an opportunistic route.
+              w.servePlan.sort((a, b) => dist(a.table.centre(), w) - dist(b.table.centre(), w));
+              const next = w.servePlan[0];
+              this._routeAgent(w, this._servicePoint(next.table, w));
+            } else {
+              w.state = "IDLE"; w.target = null; w.path = [];
+            }
+          }
+          break;
+      }
+    }
+    // Aggregate waiter distance for the metrics panel.
+    this.metrics.waiterDist = this.waiters.reduce((s, w) => s + w.distance, 0);
+  }
+
+  // Handle party-end staggered exit logic.
+  _tickPartyEnd(dt) {
+    if (this.simTime < this.partyEndSimTime) return;
+
+    for (const g of this.guests) {
+      if (["SEATED", "WAITING", "DRINKING", "SOCIALIZING"].includes(g.state)) {
+        // Schedule exit once per guest.
+        if (!g.exitScheduled) {
+          g.exitScheduled = true;
+          g.leaveAt = this.partyEndSimTime + rndf(0, 600);
+        }
+        // Check if exit time reached.
+        if (this.simTime >= g.leaveAt) {
+          this._releaseSeat(g);
+          this.metrics.totalLeft++;
+          this.metrics.waitSum += g.totalWait;
+          this.metrics.waitSamples++;
+          g.state = "LEAVING";
+          this._routeAgent(g, this.exit);
+        }
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------
+  //  Render: walls, grid, bar, entrance, tables, agents.
+  //  Painted in one pass per frame from back to front.
+  // ---------------------------------------------------------------
+  _draw() {
+    const ctx = this.ctx;
+    const W = this.canvas.width, H = this.canvas.height;
+
+    // Floor — slightly lighter than the page background so the room
+    // reads as an object on the page rather than blending into it.
+    ctx.fillStyle = "#0c0c12"; ctx.fillRect(0, 0, W, H);
+
+    // Subtle grid overlay using a single pass of vertical and
+    // horizontal lines at the configured grid size.
+    const gs = this.config?.gridSize || 24;
+    ctx.strokeStyle = "rgba(255,255,255,0.025)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let x = 0; x <= W; x += gs) { ctx.moveTo(x + 0.5, 0); ctx.lineTo(x + 0.5, H); }
+    for (let y = 0; y <= H; y += gs) { ctx.moveTo(0, y + 0.5); ctx.lineTo(W, y + 0.5); }
+    ctx.stroke();
+
+    // Walls — a single thick stroked rectangle around the room.
+    ctx.strokeStyle = "#2a2a36"; ctx.lineWidth = 4;
+    ctx.strokeRect(2, 2, W - 4, H - 4);
+
+    // Bar zone on the right wall.
+    ctx.fillStyle = "#1f1610";
+    roundRect(ctx, this.bar.x, this.bar.y, this.bar.w, this.bar.h, 6); ctx.fill();
+    ctx.strokeStyle = "#3a2a18"; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = "#82828f";
+    ctx.font = "10px ui-monospace, monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("BAR", this.bar.x + this.bar.w / 2, this.bar.y + 20);
+
+    // Entrance marker — a gap in the wall with a labelled threshold.
+    ctx.fillStyle = "#0c0c12";
+    ctx.fillRect(0, H - 70, 30, 50);
+    ctx.strokeStyle = "#3a3a48"; ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, H - 70); ctx.lineTo(30, H - 70);
+    ctx.moveTo(0, H - 20); ctx.lineTo(30, H - 20);
+    ctx.stroke();
+    ctx.fillStyle = "#82828f"; ctx.font = "10px ui-monospace, monospace";
+    ctx.textAlign = "left";
+    ctx.fillText("ENTRANCE", 6, H - 6);
+
+    // User-placed obstacles — solid dark blocks with diagonal hatching so
+    // they read as immovable infrastructure rather than furniture.
+    for (const o of this.obstacles) {
+      ctx.fillStyle = "#1a1a22";
+      ctx.fillRect(o.x, o.y, o.w, o.h);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(o.x, o.y, o.w, o.h);
+      ctx.clip();
+      ctx.strokeStyle = "rgba(255,255,255,0.06)";
+      ctx.lineWidth = 1;
+      for (let i = -o.h; i < o.w; i += 8) {
+        ctx.beginPath();
+        ctx.moveTo(o.x + i, o.y);
+        ctx.lineTo(o.x + i + o.h, o.y + o.h);
+        ctx.stroke();
+      }
+      ctx.restore();
+      ctx.strokeStyle = "#3a3a48"; ctx.lineWidth = 1;
+      ctx.strokeRect(o.x + 0.5, o.y + 0.5, o.w - 1, o.h - 1);
+    }
+
+    // Tables and chairs.
+    for (const t of this.tables) t.draw(ctx);
+
+    // Fixed-table accent ring — rotated with the table so it hugs the actual shape.
+    for (const t of this.tables) {
+      if (!t.isFixed) continue;
+      const tcx = t.x + t.w / 2, tcy = t.y + t.h / 2;
+      ctx.strokeStyle = "#f5a623"; ctx.lineWidth = 2;
+      ctx.save();
+      ctx.translate(tcx, tcy);
+      ctx.rotate(t.rotation * Math.PI / 180);
+      if (t.shape === "circle") {
+        ctx.beginPath(); ctx.arc(0, 0, t.w / 2 + 4, 0, Math.PI * 2); ctx.stroke();
+      } else {
+        roundRect(ctx, -t.w / 2 - 3, -t.h / 2 - 3, t.w + 6, t.h + 6, 10); ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    // Guests (drawn under waiters so trays stay visible).
+    for (const g of this.guests) g.draw(ctx);
+
+    // Waiters on top.
+    for (const w of this.waiters) w.draw(ctx);
+
+    // Editor drag previews.
+    if (this.editorPreview) {
+      const p = this.editorPreview;
+      ctx.fillStyle = "rgba(245,166,35,0.18)";
+      ctx.strokeStyle = "#f5a623";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([6, 4]);
+      if (p.kind === "obstacle-drag") {
+        ctx.fillRect(p.x, p.y, p.w, p.h);
+        ctx.strokeRect(p.x, p.y, p.w, p.h);
+      } else if (p.kind === "table-rect-drag") {
+        roundRect(ctx, p.x, p.y, p.w, p.h, 8);
+        ctx.fill(); ctx.stroke();
+      } else if (p.kind === "table-circle-drag") {
+        const r = Math.min(p.w, p.h) / 2;
+        ctx.beginPath(); ctx.arc(p.x + p.w / 2, p.y + p.h / 2, r, 0, Math.PI * 2);
+        ctx.fill(); ctx.stroke();
+      }
+      ctx.setLineDash([]);
+    }
+
+    // Chair-placement preview: show the pending drawn table + placed chair dots.
+    if (this.chairEditTarget) {
+      const ct = this.chairEditTarget;
+      const tcx = ct.x + ct.w / 2, tcy = ct.y + ct.h / 2;
+      ctx.save();
+      ctx.setLineDash([5, 3]);
+      ctx.strokeStyle = "#6ad17a"; ctx.lineWidth = 2;
+      ctx.translate(tcx, tcy);
+      ctx.rotate((ct.rotation || 0) * Math.PI / 180);
+      if (ct.shape === "circle") {
+        ctx.beginPath(); ctx.arc(0, 0, ct.w / 2, 0, Math.PI * 2); ctx.stroke();
+      } else {
+        roundRect(ctx, -ct.w / 2, -ct.h / 2, ct.w, ct.h, 8); ctx.stroke();
+      }
+      ctx.restore();
+      ctx.setLineDash([]);
+      // Draw placed chair anchors in world space.
+      const rad = (ct.rotation || 0) * Math.PI / 180;
+      const cos = Math.cos(rad), sin = Math.sin(rad);
+      for (const ch of ct.chairs_local) {
+        const wx = tcx + ch.dx * cos - ch.dy * sin;
+        const wy = tcy + ch.dx * sin + ch.dy * cos;
+        ctx.beginPath(); ctx.arc(wx, wy, 6, 0, Math.PI * 2);
+        ctx.fillStyle = "#6ad17a"; ctx.fill();
+      }
+    }
+
+    // Resize handles — three orange squares at right-edge, bottom-edge, and corner.
+    if (this.showResizeHandles) {
+      ctx.fillStyle = "#f5a623";
+      ctx.strokeStyle = "#1a1209"; ctx.lineWidth = 1;
+      for (const [hx, hy] of [[W, H / 2], [W / 2, H], [W, H]]) {
+        ctx.fillRect(hx - 7, hy - 7, 14, 14);
+        ctx.strokeRect(hx - 7 + 0.5, hy - 7 + 0.5, 13, 13);
+      }
+    }
+
+    // Time HUD in the upper-left corner of the canvas — duplicated in
+    // the right panel but handy when the panel is partially scrolled.
+    ctx.fillStyle = "rgba(255,255,255,0.5)";
+    ctx.font = "11px ui-monospace, monospace"; ctx.textAlign = "left";
+    ctx.fillText(`t=${this._clockText()}`, 10, 16);
+  }
+
+  // -----------------------------------------------------------------------
+  //  Headless batch interface — runs a simulation without rAF or canvas
+  //  rendering so BatchRunner can collect many results quickly.
+  // -----------------------------------------------------------------------
+  _batchStart(config) {
+    const seed = Math.floor(Math.random() * 1e9);
+    setSeed(seed);
+    this.seed   = seed;
+    this.config = config;
+    this.canvas.width  = config.roomW;
+    this.canvas.height = config.roomH;
+    this.partyType       = PARTY_TYPES[config.partyType] || PARTY_TYPES.buffet;
+    this.partyEndSimTime = this.partyType.durationSec;
+    this.simTime  = 0;
+    this.runIndex += 1;
+    this.guests   = [];
+    this.waiters  = [];
+    this.metrics  = { totalServed: 0, totalLeft: 0, impatient: 0, waitSum: 0, waitSamples: 0, waiterDist: 0, score: 0 };
+    this.spawnQueue = [];
+    this.entrance = { x: 48, y: config.roomH - 54 };
+    this.exit     = this.entrance;
+    this.bar = {
+      x: config.roomW - 90, y: 50,
+      w: 70, h: config.roomH - 100,
+      dock: { x: config.roomW - 110, y: 80 },
+    };
+    for (let t = 0; t < 5; t++) {
+      this.tables = this.generateLayout();
+      if (!this.layoutError) break;
+    }
+    if (this.layoutError) return false;
+    this.navigator = new PathNavigator(config.roomW, config.roomH, this.tables, this.bar, this.obstacles);
+    for (let i = 0; i < config.waiters; i++) {
+      this.waiters.push(new Waiter(i,
+        { x: this.bar.dock.x, y: this.bar.dock.y + i * 22 },
+        this.waiterColours[i % this.waiterColours.length]));
+    }
+    for (let i = 0; i < config.guests; i++) {
+      this.spawnQueue.push({
+        at: i * (this.partyType.arrivalWindowSec / Math.max(1, config.guests)) + rndf(0, 30),
+      });
+    }
+    this.running = true;
+    return true;
+  }
+
+  // Herstart de simulatie met een bestaande tafelindeling (zelfde posities, nieuwe seed).
+  // Hierdoor kunnen meerdere seeds per layout worden uitgevoerd voor ruisreductie.
+  _batchStartWithLayout(config, tables, seed) {
+    setSeed(seed);
+    this.seed   = seed;
+    this.config = config;
+    this.canvas.width  = config.roomW;
+    this.canvas.height = config.roomH;
+    this.partyType       = PARTY_TYPES[config.partyType] || PARTY_TYPES.buffet;
+    this.partyEndSimTime = this.partyType.durationSec;
+    this.simTime  = 0;
+    this.runIndex += 1;
+    this.guests   = [];
+    this.waiters  = [];
+    this.metrics  = { totalServed: 0, totalLeft: 0, impatient: 0, waitSum: 0, waitSamples: 0, waiterDist: 0, score: 0 };
+    this.spawnQueue = [];
+    this.entrance = { x: 48, y: config.roomH - 54 };
+    this.exit     = this.entrance;
+    this.bar = {
+      x: config.roomW - 90, y: 50,
+      w: 70, h: config.roomH - 100,
+      dock: { x: config.roomW - 110, y: 80 },
+    };
+    // Reset stateful fields on each table (geometry/positions unchanged).
+    for (const t of tables) {
+      t.guests         = [];
+      t.ordered        = false;
+      t.orderTakenAt   = -1;
+      t.drinksDelivered = 0;
+    }
+    this.tables = tables;
+    this.navigator = new PathNavigator(config.roomW, config.roomH, this.tables, this.bar, this.obstacles);
+    for (let i = 0; i < config.waiters; i++) {
+      this.waiters.push(new Waiter(i,
+        { x: this.bar.dock.x, y: this.bar.dock.y + i * 22 },
+        this.waiterColours[i % this.waiterColours.length]));
+    }
+    for (let i = 0; i < config.guests; i++) {
+      this.spawnQueue.push({
+        at: i * (this.partyType.arrivalWindowSec / Math.max(1, config.guests)) + rndf(0, 30),
+      });
+    }
+    this.running = true;
+    return true;
+  }
+
+  _batchTick(dt) {
+    this.simTime += dt;
+    this._spawnGuests();
+    this._tickGuests(dt);
+    this._tickWaiters(dt);
+    this._tickPartyEnd(dt);
+    if (this.simTime >= this.partyEndSimTime && this.guests.length === 0) {
+      this.running = false;
+    }
+  }
+
+  _batchSnapshot() {
+    this.metrics.waiterDist = this.waiters.reduce((s, w) => s + w.distance, 0);
+    this.metrics.score = this.efficiencyScore();
+    return {
+      seed: this.seed,
+      config: {
+        roomW:     this.config.roomW,
+        roomH:     this.config.roomH,
+        guests:    this.config.guests,
+        waiters:   this.config.waiters,
+        tSmall:    this.config.tSmall,
+        tMedium:   this.config.tMedium,
+        tLarge:    this.config.tLarge,
+        partyType: this.config.partyType,
+      },
+      metrics: {
+        score:       this.metrics.score,
+        totalServed: this.metrics.totalServed,
+        totalLeft:   this.metrics.totalLeft,
+        impatient:   this.metrics.impatient,
+        avgWait:     this.metrics.waitSamples ? this.metrics.waitSum / this.metrics.waitSamples : 0,
+        waiterDist:  this.metrics.waiterDist,
+      },
+      tables: this.tables.map(t => ({
+        size: t.size, x: t.x, y: t.y, rotation: t.rotation, w: t.w, h: t.h, seats: t.seats,
+      })),
+    };
+  }
+}
+
+// -----------------------------------------------------------------------
+//  BatchRunner — drives many headless simulation runs and collects
+//  results into a JSON dataset for model training.
+//
+//  Uses setTimeout(fn,0) between chunks so the browser stays responsive
+//  during long batches. Each chunk advances the simulation by TICKS*DT
+//  simulated seconds before yielding.
+// -----------------------------------------------------------------------
+class BatchRunner {
+  constructor(engine) {
+    this.engine  = engine;
+    this.active  = false;
+    this.results = [];
+    this.total   = 0;
+    this.done    = 0;
+    this._abort  = false;
+    this._seedsPerLayout = 1;
+  }
+
+  start({ total, seedsPerLayout = 1, configFn, onProgress, onFinish }) {
+    this.total   = total;
+    this.done    = 0;
+    this.results = [];
+    this.active  = true;
+    this._abort  = false;
+    this._seedsPerLayout = Math.max(1, seedsPerLayout | 0);
+    this._configFn   = configFn;
+    this._onProgress = onProgress;
+    this._onFinish   = onFinish;
+    this._scheduleNext();
+  }
+
+  stop() { this._abort = true; this.active = false; }
+
+  _scheduleNext() {
+    if (this._abort || this.done >= this.total) {
+      this.active = false;
+      if (this._onFinish) this._onFinish(this.results);
+      return;
+    }
+    setTimeout(() => this._runOne(), 0);
+  }
+
+  _runOne() {
+    if (this._abort) return;
+    const config = this._configFn(this.done);
+    const ok = this.engine._batchStart(config);
+    if (!ok) { this.done++; this._scheduleNext(); return; }
+    // Snapshot layout now (before simulation mutates table state).
+    this._currentConfig   = config;
+    this._currentTables   = this.engine.tables;
+    this._currentSeedRuns = [];
+    this._chunk();
+  }
+
+  _chunk() {
+    const TICKS  = 100;
+    const DT     = 1;
+    const SAFETY = this.engine.partyEndSimTime + 3 * 3600;
+
+    const step = () => {
+      if (this._abort) return;
+      for (let i = 0; i < TICKS && this.engine.running; i++) {
+        this.engine._batchTick(DT);
+      }
+      const finished = !this.engine.running || this.engine.simTime > SAFETY;
+      if (finished) {
+        this._currentSeedRuns.push(this.engine._batchSnapshot());
+
+        if (this._currentSeedRuns.length < this._seedsPerLayout) {
+          // Same layout, new seed.
+          const nextSeed = Math.floor(Math.random() * 1e9);
+          this.engine._batchStartWithLayout(this._currentConfig, this._currentTables, nextSeed);
+          this._chunk();
+        } else {
+          // All seeds done — aggregate and store.
+          const r = this._aggregate(this._currentSeedRuns);
+          this.results.push(r);
+          this.done++;
+          if (this._onProgress) this._onProgress(this.done, this.total, r);
+          this._scheduleNext();
+        }
+      } else {
+        setTimeout(step, 0);
+      }
+    };
+    setTimeout(step, 0);
+  }
+
+  // Middelt metrische waarden over alle seed-runs; layout (tafels) is voor elke run gelijk.
+  _aggregate(runs) {
+    const keys = Object.keys(runs[0].metrics);
+    const avgMetrics = {};
+    for (const k of keys) {
+      avgMetrics[k] = runs.reduce((s, r) => s + r.metrics[k], 0) / runs.length;
+    }
+    return {
+      seed:    runs[0].seed,          // eerste seed (achterwaartse compatibiliteit)
+      seeds:   runs.map(r => r.seed), // alle seeds
+      config:  runs[0].config,
+      metrics: avgMetrics,            // gemiddelde over seeds
+      tables:  runs[0].tables,        // layout (zelfde voor elke seed)
+      runs:    runs,                  // individuele seed-resultaten
+    };
+  }
+
+  exportJSON() {
+    const blob = new Blob([JSON.stringify(this.results, null, 2)], { type: "application/json" });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement("a");
+    a.href = url;
+    const d  = new Date();
+    const ds = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    a.download = `restaurant-sim-batch-${ds}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+}
+
+// -----------------------------------------------------------------------
+//  UI wiring — read controls, hook buttons, refresh metrics @1Hz
+// -----------------------------------------------------------------------
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const engine = new SimulationEngine($("stage"));
+
+  // Live label updates for the two range sliders.
+  $("guests").addEventListener("input", (e) => $("guestsVal").textContent = e.target.value);
+  $("waiters").addEventListener("input", (e) => $("waitersVal").textContent = e.target.value);
+
+  function readConfig() {
+    return {
+      roomW:    parseInt($("roomW").value,    10),
+      roomH:    parseInt($("roomH").value,    10),
+      gridSize: parseInt($("gridSize").value, 10),
+      guests:   parseInt($("guests").value,   10),
+      waiters:  parseInt($("waiters").value,  10),
+      tSmall:   parseInt($("tSmall").value,   10),
+      tMedium:  parseInt($("tMedium").value,  10),
+      tLarge:   parseInt($("tLarge").value,   10),
+      speed:    parseInt($("speed").value,    10),
+      seed:     $("seed").value ? parseInt($("seed").value, 10) : null,
+      partyType: $("partyType").value,
+    };
+  }
+
+  $("speed").addEventListener("change", (e) => engine.speedMul = parseInt(e.target.value, 10));
+
+  // Clear the seat-error banner whenever the user adjusts guests or table mix.
+  ["guests", "tSmall", "tMedium", "tLarge"].forEach(id =>
+    $(id).addEventListener("input", () => $("seatError").style.display = "none")
+  );
+
+  // Returns total available seats for a given config + current drawnTables.
+  // Standard table seats come from the full mix setting (fixed tables are a
+  // subset of that mix, so we don't double-count).
+  function countSeats(cfg) {
+    const standardSeats = cfg.tSmall  * getTableTypeDef("small").seats
+                        + cfg.tMedium * getTableTypeDef("medium").seats
+                        + cfg.tLarge  * getTableTypeDef("large").seats;
+    const drawnSeats = engine.drawnTables.reduce((s, dt) => s + (dt.chairs_local ? dt.chairs_local.length : 0), 0);
+    return standardSeats + drawnSeats;
+  }
+
+  // Show an error and return false when there aren't enough seats; clear and return true otherwise.
+  function checkSeats(cfg) {
+    const seats = countSeats(cfg);
+    const err = $("seatError");
+    if (seats < cfg.guests) {
+      err.textContent = `Niet genoeg zitplaatsen: ${seats} beschikbaar, ${cfg.guests} gasten. Voeg meer tafels toe of verlaag het aantal gasten.`;
+      err.style.display = "block";
+      return false;
+    }
+    err.style.display = "none";
+    return true;
+  }
+
+  $("runBtn").addEventListener("click", () => {
+    const cfg = readConfig();
+    if (!checkSeats(cfg)) return;
+    engine.speedMul = cfg.speed;
+    engine.start(cfg);
+    if (engine.layoutError) {
+      $("seatError").textContent = engine.layoutError;
+      $("seatError").style.display = "block";
+      return;
+    }
+    $("seatError").style.display = "none";
+    $("pauseBtn").textContent = "Pause";
+  });
+
+  $("pauseBtn").addEventListener("click", () => {
+    if (engine.paused) { engine.resume(); $("pauseBtn").textContent = "Pause"; }
+    else               { engine.pause();  $("pauseBtn").textContent = "Resume"; }
+  });
+
+  // Update the "last seed used" display.
+  function updateLastSeed() {
+    $("lastSeed").textContent = engine.seed != null ? engine.seed : "—";
+  }
+
+  // Populate the run history list from localStorage.
+  function updateRunHistoryList() {
+    const listEl = $("runHistoryList");
+    try {
+      const runs = JSON.parse(localStorage.getItem("restaurantSim.runs") || "[]");
+      if (!runs.length) {
+        listEl.innerHTML = '<div style="color: var(--muted); font-size: 11px; padding: 4px;">No runs yet</div>';
+        return;
+      }
+      listEl.innerHTML = runs.map((run, idx) => `
+        <div class="run-entry" data-run-idx="${idx}"
+             style="padding: 4px; border-bottom: 1px solid var(--border); cursor: pointer; font-family: var(--mono); font-size: 11px;">
+          Run #${run.runId} — score: ${run.metrics.score} — seed: ${run.seed}
+        </div>
+      `).join("");
+    } catch (e) {
+      listEl.innerHTML = '<div style="color: var(--muted); font-size: 11px; padding: 4px;">Error loading history</div>';
+    }
+  }
+
+  // Load a run's config from history and populate the UI.
+  function loadRunConfig(idx) {
+    try {
+      const runs = JSON.parse(localStorage.getItem("restaurantSim.runs") || "[]");
+      const run = runs[idx];
+      if (!run) return;
+      $("seed").value = run.seed;
+      $("roomW").value = run.config.roomW;
+      $("roomH").value = run.config.roomH;
+      $("guests").value = run.config.guests;
+      $("waiters").value = run.config.waiters;
+      $("tSmall").value = run.config.tSmall;
+      $("tMedium").value = run.config.tMedium;
+      $("tLarge").value = run.config.tLarge;
+      if (run.config.partyType) $("partyType").value = run.config.partyType;
+      // Update the slider value displays.
+      document.getElementById("guestsVal").textContent = run.config.guests;
+      document.getElementById("waitersVal").textContent = run.config.waiters;
+      // Restore user-placed layout (fixed tables + obstacles) so the next
+      // Run reproduces the exact scene that generated this run's score.
+      if (run.fixedTables) engine.fixedTables = run.fixedTables.map(t => ({ size: t.size, x: t.x, y: t.y, rotation: t.rotation || 0 }));
+      if (run.drawnTables) engine.drawnTables = run.drawnTables.slice();
+      if (run.obstacles)   engine.obstacles   = run.obstacles.map(o => ({ x: o.x, y: o.y, w: o.w, h: o.h }));
+      saveLayout();
+    } catch (e) {
+      // Fail silently.
+    }
+  }
+
+  // Event delegation for run history entries — onclick attributes in
+  // innerHTML resolve against the global scope, but our handler lives in
+  // an IIFE closure, so we wire it up here instead.
+  $("runHistoryList").addEventListener("click", (e) => {
+    const entry = e.target.closest(".run-entry");
+    if (!entry) return;
+    loadRunConfig(parseInt(entry.dataset.runIdx, 10));
+  });
+
+  // Clear all run history.
+  $("clearHistoryBtn").addEventListener("click", () => {
+    try {
+      localStorage.removeItem("restaurantSim.runs");
+      updateRunHistoryList();
+    } catch (e) {
+      // Fail silently.
+    }
+  });
+
+  // Export run history as JSON file.
+  $("exportHistoryBtn").addEventListener("click", () => {
+    try {
+      const runs = localStorage.getItem("restaurantSim.runs") || "[]";
+      const blob = new Blob([runs], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const now = new Date();
+      const yyyy = now.getFullYear();
+      const mm = (now.getMonth() + 1).toString().padStart(2, "0");
+      const dd = now.getDate().toString().padStart(2, "0");
+      a.download = `restaurant-sim-runs-${yyyy}-${mm}-${dd}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      // Fail silently.
+    }
+  });
+
+  // ---------------------------------------------------------------
+  //  Layout editor: place fixed tables, draw custom tables, add
+  //  obstacles, and resize the room. Persisted in localStorage.
+  // ---------------------------------------------------------------
+  let editMode = false;
+  let editTool = "fixed-small";
+  let editDragStart = null;
+  let resizeDrag = null;     // null | { dir, startCX, startCY, startW, startH, scaleX, scaleY }
+  let presetActiveTool = null; // { name, shape, w, h, chairs_local, rotation } when placing a preset
+
+  const TOOL_HINTS = {
+    "fixed-small":       "Klik om een kleine vaste tafel te plaatsen · Rechtermuisknop = roteren",
+    "fixed-medium":      "Klik om een middelgrote vaste tafel te plaatsen · Rechtermuisknop = roteren",
+    "fixed-large":       "Klik om een grote vaste tafel te plaatsen · Rechtermuisknop = roteren",
+    "obstacle":          "Sleep om een obstakel te tekenen",
+    "delete":            "Klik op een tafel of obstakel om te verwijderen",
+    "draw-table-rect":   "Sleep om een rechthoekige tafel te tekenen",
+    "draw-table-circle": "Sleep om een ronde tafel te tekenen",
+  };
+
+  function updateLayoutCounts() {
+    $("fixedCount").textContent = engine.fixedTables.length;
+    $("drawnCount").textContent = engine.drawnTables.length;
+    $("obstacleCount").textContent = engine.obstacles.length;
+  }
+
+  function saveLayout() {
+    try {
+      localStorage.setItem("restaurantSim.layout", JSON.stringify({
+        fixedTables: engine.fixedTables,
+        drawnTables: engine.drawnTables,
+        obstacles: engine.obstacles,
+      }));
+    } catch (e) {}
+    updateLayoutCounts();
+  }
+
+  function loadLayout() {
+    try {
+      const saved = JSON.parse(localStorage.getItem("restaurantSim.layout") || "null");
+      if (saved) {
+        engine.fixedTables = saved.fixedTables || [];
+        engine.drawnTables = saved.drawnTables || [];
+        engine.obstacles   = saved.obstacles   || [];
+      }
+    } catch (e) {}
+    updateLayoutCounts();
+  }
+
+  function loadPresets() {
+    try { return JSON.parse(localStorage.getItem("restaurantSim.customPresets") || "[]"); }
+    catch (e) { return []; }
+  }
+
+  function savePresets(presets) {
+    try { localStorage.setItem("restaurantSim.customPresets", JSON.stringify(presets)); }
+    catch (e) {}
+  }
+
+  function renderPresetGallery() {
+    const gallery = $("presetGallery");
+    const presets = loadPresets();
+    gallery.innerHTML = "";
+    if (presets.length === 0) {
+      gallery.innerHTML = '<span class="no-presets">Geen presets — teken een tafel en sla op</span>';
+      return;
+    }
+    presets.forEach((preset, i) => {
+      const item = document.createElement("div");
+      item.className = "preset-item" + (presetActiveTool === preset ? " active" : "");
+      item.dataset.presetIdx = i;
+      const shape = preset.shape === "circle" ? "◯" : "▭";
+      const seats = (preset.chairs_local || []).length;
+      item.innerHTML = `<span>${shape} ${preset.name} (${seats})</span>`;
+      const del = document.createElement("button");
+      del.className = "pdel";
+      del.textContent = "×";
+      del.title = "Preset verwijderen";
+      del.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        const ps = loadPresets();
+        ps.splice(i, 1);
+        savePresets(ps);
+        renderPresetGallery();
+      });
+      item.appendChild(del);
+      item.addEventListener("click", () => {
+        presetActiveTool = preset;
+        document.querySelectorAll("#editorBar button[data-tool]").forEach(b => b.classList.remove("selected"));
+        document.querySelectorAll("#presetGallery .preset-item").forEach(b => b.classList.remove("active"));
+        item.classList.add("active");
+        $("editHint").textContent = `Klik om "${preset.name}" te plaatsen`;
+      });
+      gallery.appendChild(item);
+    });
+  }
+
+  function getCanvasCoords(e) {
+    const canvas = $("stage");
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (e.clientX - rect.left) * (canvas.width / rect.width),
+      y: (e.clientY - rect.top)  * (canvas.height / rect.height),
+    };
+  }
+
+  function fixedTableDims(size) {
+    const def = getTableTypeDef(size);
+    return { w: def.w, h: def.h };
+  }
+
+  // Check if a rect overlaps any existing fixed table, drawn table, or obstacle.
+  function overlapsAny(newRect) {
+    for (const t of engine.fixedTables) {
+      const td = fixedTableDims(t.size);
+      if (rectOverlap(newRect, { x: t.x, y: t.y, w: td.w, h: td.h })) return true;
+    }
+    for (const dt of engine.drawnTables) {
+      if (rectOverlap(newRect, { x: dt.x, y: dt.y, w: dt.w, h: dt.h })) return true;
+    }
+    for (const o of engine.obstacles) {
+      if (rectOverlap(newRect, o)) return true;
+    }
+    return false;
+  }
+
+  function placeFixedTable(size, p) {
+    const dim = fixedTableDims(size);
+    const room = engine.config || { roomW: engine.canvas.width, roomH: engine.canvas.height };
+    const x = Math.max(40, Math.min(room.roomW - dim.w - 120, p.x - dim.w / 2));
+    const y = Math.max(40, Math.min(room.roomH - dim.h - 60,  p.y - dim.h / 2));
+    if (overlapsAny({ x, y, w: dim.w, h: dim.h })) {
+      $("editHint").textContent = "Kan niet plaatsen — overlapt een bestaande tafel of obstakel.";
+      return;
+    }
+    engine.fixedTables.push({ size, x, y, rotation: 0 });
+  }
+
+  function placePreset(preset, p) {
+    const room = engine.config || { roomW: engine.canvas.width, roomH: engine.canvas.height };
+    const x = Math.max(40, Math.min(room.roomW - preset.w - 120, p.x - preset.w / 2));
+    const y = Math.max(40, Math.min(room.roomH - preset.h - 60,  p.y - preset.h / 2));
+    if (overlapsAny({ x, y, w: preset.w, h: preset.h })) {
+      $("editHint").textContent = "Kan niet plaatsen — overlapt een bestaande tafel of obstakel.";
+      return;
+    }
+    engine.drawnTables.push({
+      shape: preset.shape,
+      x, y, w: preset.w, h: preset.h,
+      rotation: preset.rotation || 0,
+      chairs_local: (preset.chairs_local || []).slice(),
+    });
+    saveLayout();
+    refreshScenePreview();
+  }
+
+  function deleteAt(p) {
+    for (let i = engine.obstacles.length - 1; i >= 0; i--) {
+      const o = engine.obstacles[i];
+      if (p.x >= o.x && p.x <= o.x + o.w && p.y >= o.y && p.y <= o.y + o.h) {
+        engine.obstacles.splice(i, 1); return true;
+      }
+    }
+    for (let i = engine.drawnTables.length - 1; i >= 0; i--) {
+      const dt = engine.drawnTables[i];
+      if (p.x >= dt.x && p.x <= dt.x + dt.w && p.y >= dt.y && p.y <= dt.y + dt.h) {
+        engine.drawnTables.splice(i, 1); return true;
+      }
+    }
+    for (let i = engine.fixedTables.length - 1; i >= 0; i--) {
+      const t = engine.fixedTables[i];
+      const dim = fixedTableDims(t.size);
+      if (p.x >= t.x && p.x <= t.x + dim.w && p.y >= t.y && p.y <= t.y + dim.h) {
+        engine.fixedTables.splice(i, 1); return true;
+      }
+    }
+    return false;
+  }
+
+  function refreshScenePreview() {
+    if (!engine.config) return;
+    engine.guests = [];
+    engine.waiters = [];
+    engine.spawnQueue = [];
+    engine.tables = engine.generateLayout();
+    engine.navigator = new PathNavigator(engine.config.roomW, engine.config.roomH, engine.tables, engine.bar, engine.obstacles);
+  }
+
+  // Commit the pending drawn table (with chairs) to drawnTables.
+  function confirmChairEdit() {
+    const ct = engine.chairEditTarget;
+    if (!ct) return;
+    engine.chairEditTarget = null;
+    $("confirmChairBtn").style.display = "none";
+    // Offer to save as preset.
+    const name = window.prompt("Naam voor deze tafel (leeg = niet opslaan als preset):", "");
+    if (name && name.trim()) {
+      const presets = loadPresets();
+      presets.push({
+        name: name.trim(),
+        shape: ct.shape,
+        w: ct.w, h: ct.h,
+        rotation: ct.rotation || 0,
+        chairs_local: ct.chairs_local.slice(),
+      });
+      savePresets(presets);
+      renderPresetGallery();
+    }
+    engine.drawnTables.push(ct);
+    saveLayout();
+    refreshScenePreview();
+    $("editHint").textContent = TOOL_HINTS[editTool] || "";
+  }
+
+  // Returns which resize handle direction the point hits, or null.
+  function hitResizeHandle(p) {
+    const W = engine.canvas.width, H = engine.canvas.height;
+    if (Math.abs(p.x - W) < 12 && Math.abs(p.y - H) < 12) return "wh";
+    if (Math.abs(p.x - W) < 12 && Math.abs(p.y - H / 2) < 12) return "w";
+    if (Math.abs(p.x - W / 2) < 12 && Math.abs(p.y - H) < 12) return "h";
+    return null;
+  }
+
+  $("editLayoutBtn").addEventListener("click", () => {
+    editMode = !editMode;
+    engine.chairEditTarget = null;
+    $("confirmChairBtn").style.display = "none";
+    if (editMode) {
+      engine.pause();
+      $("pauseBtn").textContent = "Resume";
+      $("editorBar").classList.add("active");
+      $("presetGallery").style.display = "flex";
+      $("stage").classList.add("editing");
+      $("editLayoutBtn").textContent = "Klaar met bewerken";
+      $("editHint").textContent = TOOL_HINTS[editTool];
+      engine.showResizeHandles = true;
+      renderPresetGallery();
+    } else {
+      $("editorBar").classList.remove("active");
+      $("presetGallery").style.display = "none";
+      $("stage").classList.remove("editing");
+      $("editLayoutBtn").textContent = "Edit Layout";
+      engine.editorPreview = null;
+      engine.showResizeHandles = false;
+      presetActiveTool = null;
+      const cfg = readConfig();
+      if (!checkSeats(cfg)) {
+        // Stay in edit mode so the user can fix the layout.
+        editMode = true;
+        $("editorBar").classList.add("active");
+        $("presetGallery").style.display = "flex";
+        $("stage").classList.add("editing");
+        $("editLayoutBtn").textContent = "Klaar met bewerken";
+        engine.showResizeHandles = true;
+        return;
+      }
+      engine.speedMul = cfg.speed;
+      engine.start(cfg);
+      if (engine.layoutError) {
+        $("seatError").textContent = engine.layoutError;
+        $("seatError").style.display = "block";
+        // Re-enter edit mode so the user can fix the layout.
+        editMode = true;
+        $("editorBar").classList.add("active");
+        $("presetGallery").style.display = "flex";
+        $("stage").classList.add("editing");
+        $("editLayoutBtn").textContent = "Klaar met bewerken";
+        engine.showResizeHandles = true;
+        return;
+      }
+      $("seatError").style.display = "none";
+      $("pauseBtn").textContent = "Pause";
+    }
+  });
+
+  $("confirmChairBtn").addEventListener("click", confirmChairEdit);
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && engine.chairEditTarget) confirmChairEdit();
+  });
+
+  document.querySelectorAll("#editorBar button[data-tool]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll("#editorBar button[data-tool]").forEach(b => b.classList.remove("selected"));
+      document.querySelectorAll("#presetGallery .preset-item").forEach(b => b.classList.remove("active"));
+      btn.classList.add("selected");
+      editTool = btn.dataset.tool;
+      presetActiveTool = null;
+      $("editHint").textContent = TOOL_HINTS[editTool] || "";
+    });
+  });
+
+  $("stage").addEventListener("mousedown", (e) => {
+    if (!editMode || e.button !== 0) return;
+    const p = getCanvasCoords(e);
+
+    // Resize handles take priority.
+    const rdir = hitResizeHandle(p);
+    if (rdir) {
+      const rect = engine.canvas.getBoundingClientRect();
+      resizeDrag = {
+        dir: rdir,
+        startCX: e.clientX, startCY: e.clientY,
+        startW: engine.canvas.width, startH: engine.canvas.height,
+        scaleX: rect.width  / engine.canvas.width,
+        scaleY: rect.height / engine.canvas.height,
+      };
+      return;
+    }
+
+    // Chair placement sub-mode.
+    if (engine.chairEditTarget) {
+      const ct = engine.chairEditTarget;
+      const tcx = ct.x + ct.w / 2, tcy = ct.y + ct.h / 2;
+      const rad = (ct.rotation || 0) * Math.PI / 180;
+      const cos = Math.cos(rad), sin = Math.sin(rad);
+      // Check if click is near an existing chair (remove it).
+      for (let i = ct.chairs_local.length - 1; i >= 0; i--) {
+        const ch = ct.chairs_local[i];
+        const wx = tcx + ch.dx * cos - ch.dy * sin;
+        const wy = tcy + ch.dx * sin + ch.dy * cos;
+        if (Math.hypot(p.x - wx, p.y - wy) < 10) {
+          ct.chairs_local.splice(i, 1);
+          return;
+        }
+      }
+      // Add chair at click position (store relative to table centre).
+      const dx_world = p.x - tcx, dy_world = p.y - tcy;
+      ct.chairs_local.push({
+        dx:  dx_world * cos + dy_world * sin,
+        dy: -dx_world * sin + dy_world * cos,
+      });
+      return;
+    }
+
+    if (editTool === "obstacle" || editTool === "draw-table-rect" || editTool === "draw-table-circle") {
+      editDragStart = p;
+      const kind = editTool === "obstacle" ? "obstacle-drag"
+                 : editTool === "draw-table-rect" ? "table-rect-drag" : "table-circle-drag";
+      engine.editorPreview = { kind, x: p.x, y: p.y, w: 0, h: 0 };
+    } else if (editTool === "delete") {
+      deleteAt(p);
+      saveLayout();
+      refreshScenePreview();
+    } else if (presetActiveTool) {
+      placePreset(presetActiveTool, p);
+    } else if (editTool.startsWith("fixed-")) {
+      const size = editTool.replace("fixed-", "");
+      placeFixedTable(size, p);
+      saveLayout();
+      refreshScenePreview();
+    }
+  });
+
+  // Right-click on a fixed table rotates it 45°.
+  $("stage").addEventListener("contextmenu", (e) => {
+    if (!editMode) return;
+    e.preventDefault();
+    const p = getCanvasCoords(e);
+    for (let i = engine.fixedTables.length - 1; i >= 0; i--) {
+      const t = engine.fixedTables[i];
+      const dim = fixedTableDims(t.size);
+      if (p.x >= t.x && p.x <= t.x + dim.w && p.y >= t.y && p.y <= t.y + dim.h) {
+        t.rotation = ((t.rotation || 0) + 45) % 360;
+        saveLayout();
+        refreshScenePreview();
+        return;
+      }
+    }
+  });
+
+  // Resize tracked on window so dragging outside the canvas still works.
+  window.addEventListener("mousemove", (e) => {
+    if (!resizeDrag) return;
+    const rd = resizeDrag;
+    const dxIntrinsic = (e.clientX - rd.startCX) / rd.scaleX;
+    const dyIntrinsic = (e.clientY - rd.startCY) / rd.scaleY;
+    let newW = engine.canvas.width, newH = engine.canvas.height;
+    if (rd.dir === "w" || rd.dir === "wh") newW = Math.round(clamp(rd.startW + dxIntrinsic, 600, 1400) / 20) * 20;
+    if (rd.dir === "h" || rd.dir === "wh") newH = Math.round(clamp(rd.startH + dyIntrinsic, 400, 900) / 20) * 20;
+    engine.canvas.width  = newW;
+    engine.canvas.height = newH;
+    $("roomW").value = newW;
+    $("roomH").value = newH;
+  });
+
+  $("stage").addEventListener("mousemove", (e) => {
+    if (!editMode) return;
+    const p = getCanvasCoords(e);
+
+    // Resize handle hover cursor (resize drag itself is handled on window).
+    const dir = hitResizeHandle(p);
+    engine.canvas.style.cursor = dir === "wh" ? "nwse-resize"
+                                : dir === "w"  ? "ew-resize"
+                                : dir === "h"  ? "ns-resize"
+                                : editTool !== "delete" ? "crosshair" : "default";
+
+    if (!editDragStart) return;
+    const rawW = p.x - editDragStart.x;
+    const rawH = p.y - editDragStart.y;
+    let px = Math.min(editDragStart.x, p.x);
+    let py = Math.min(editDragStart.y, p.y);
+    let pw = Math.abs(rawW), ph = Math.abs(rawH);
+    if (editTool === "draw-table-circle") {
+      // Constrain to square so the result is a true circle, not an ellipse.
+      const d = Math.min(pw, ph);
+      pw = d; ph = d;
+    }
+    engine.editorPreview = {
+      kind: editTool === "obstacle" ? "obstacle-drag"
+          : editTool === "draw-table-rect" ? "table-rect-drag" : "table-circle-drag",
+      x: px, y: py, w: pw, h: ph,
+    };
+  });
+
+  // Mouseup attached to window so drag completes even off-canvas.
+  window.addEventListener("mouseup", (e) => {
+    if (!editMode) return;
+
+    // Finalize resize.
+    if (resizeDrag) {
+      resizeDrag = null;
+      refreshScenePreview();
+      return;
+    }
+
+    if (!editDragStart) return;
+    const p = getCanvasCoords(e);
+    const x = Math.min(editDragStart.x, p.x);
+    const y = Math.min(editDragStart.y, p.y);
+    let w = Math.abs(p.x - editDragStart.x);
+    let h = Math.abs(p.y - editDragStart.y);
+    if (editTool === "draw-table-circle") { const d = Math.min(w, h); w = d; h = d; }
+    editDragStart = null;
+    engine.editorPreview = null;
+
+    const minSize = 20;
+    if (w < minSize || h < minSize) return;
+
+    if (editTool === "obstacle") {
+      const newRect = { x, y, w, h };
+      if (overlapsAny(newRect)) {
+        $("editHint").textContent = "Kan niet plaatsen — overlapt een bestaande tafel of obstakel.";
+        return;
+      }
+      engine.obstacles.push({ x, y, w, h });
+      saveLayout();
+      refreshScenePreview();
+    } else if (editTool === "draw-table-rect" || editTool === "draw-table-circle") {
+      const newRect = { x, y, w, h };
+      if (overlapsAny(newRect)) {
+        $("editHint").textContent = "Kan niet plaatsen — overlapt een bestaande tafel of obstakel.";
+        return;
+      }
+      const shape = editTool === "draw-table-circle" ? "circle" : "rect";
+      engine.chairEditTarget = { shape, x, y, w, h, rotation: 0, chairs_local: [] };
+      $("confirmChairBtn").style.display = "";
+      $("editHint").textContent = "Klik om stoelen te plaatsen · Klik op stoel = verwijder · Enter of ✓ om te bevestigen";
+    }
+  });
+
+  // First run on load so the canvas isn't empty.
+  loadLayout();
+  updateSeatLabels();
+  updateRunHistoryList();
+  const initial = readConfig();
+  engine.speedMul = initial.speed;
+  engine.start(initial);
+  updateLastSeed();
+
+  // ---------------------------------------------------------------
+  //  Table Type Editor modal
+  // ---------------------------------------------------------------
+  const TTE_LABELS = { small: "Klein (S)", medium: "Middel (M)", large: "Groot (L)" };
+
+  // Per-type chair layout while modal is open.
+  // null = use algorithm; array of {dx,dy} = manual (real-world px from centre).
+  let tteChairsLocal = { small: null, medium: null, large: null };
+  let tteDragState = null; // { size, idx } while dragging a chair
+
+  function updateSeatLabels() {
+    $("labelSmallSeats").textContent  = getTableTypeDef("small").seats;
+    $("labelMediumSeats").textContent = getTableTypeDef("medium").seats;
+    $("labelLargeSeats").textContent  = getTableTypeDef("large").seats;
+  }
+
+  // Returns the scale factor used when drawing the preview for a given size.
+  function getTTEScale(size) {
+    const w  = parseInt($("tteW_" + size).value, 10) || 60;
+    const h  = parseInt($("tteH_" + size).value, 10) || 60;
+    const ic = $("tteShape_" + size + "_circle").checked;
+    return 68 / (Math.max(w, ic ? w : h) + 14 * 2 + 10);
+  }
+
+  // Compute algorithmic chair positions for a given size as {dx,dy} real-world offsets.
+  function getAutoChairs(size) {
+    const w    = parseInt($("tteW_" + size).value, 10) || 60;
+    const rawH = parseInt($("tteH_" + size).value, 10) || 60;
+    const n    = Math.max(1, parseInt($("tteS_" + size).value, 10) || 2);
+    const ic   = $("tteShape_" + size + "_circle").checked;
+    const h    = ic ? w : rawH;
+    const margin = 14;
+    const local = [];
+    if (ic) {
+      for (let i = 0; i < n; i++) {
+        const a = -Math.PI / 2 + i * 2 * Math.PI / n;
+        local.push({ dx: (w / 2 + margin) * Math.cos(a), dy: (h / 2 + margin) * Math.sin(a) });
+      }
+    } else {
+      const top = Math.ceil(n / 2), bot = Math.floor(n / 2);
+      const hy = h / 2 + margin;
+      for (let i = 0; i < top; i++) { const t = top > 1 ? i / (top - 1) : 0.5; local.push({ dx: (t - 0.5) * w * 0.8, dy: -hy }); }
+      for (let i = 0; i < bot; i++)  { const t = bot  > 1 ? i / (bot  - 1) : 0.5; local.push({ dx: (t - 0.5) * w * 0.8, dy:  hy }); }
+    }
+    return local;
+  }
+
+  function drawTTEPreview(size) {
+    const canvas = $("ttePreview_" + size);
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, 100, 100);
+    ctx.fillStyle = "#08080d"; ctx.fillRect(0, 0, 100, 100);
+
+    const rawW  = parseInt($("tteW_" + size).value, 10) || 60;
+    const rawH  = parseInt($("tteH_" + size).value, 10) || 60;
+    const seats = Math.max(1, parseInt($("tteS_" + size).value, 10) || 2);
+    const isCircle = $("tteShape_" + size + "_circle").checked;
+    const w = rawW, h = isCircle ? rawW : rawH;
+
+    const chairMargin = 14;
+    const totalSpan = Math.max(w, h) + chairMargin * 2 + 10;
+    const scale = 68 / totalSpan;
+    const cx = 50, cy = 50;
+    const sw = w * scale, sh = h * scale;
+
+    // Table body
+    ctx.save(); ctx.translate(cx, cy);
+    ctx.fillStyle = "rgba(0,0,0,0.4)";
+    if (isCircle) { ctx.beginPath(); ctx.arc(2 * scale, 3 * scale, sw / 2, 0, Math.PI * 2); ctx.fill(); }
+    else { roundRect(ctx, -sw / 2 + 2 * scale, -sh / 2 + 3 * scale, sw, sh, 5 * scale); ctx.fill(); }
+    ctx.fillStyle = size === "small" ? "#3a2a1a" : size === "medium" ? "#4a3320" : "#5a3d24";
+    ctx.strokeStyle = "rgba(255,255,255,0.06)"; ctx.lineWidth = 1;
+    if (isCircle) { ctx.beginPath(); ctx.arc(0, 0, sw / 2, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); }
+    else { roundRect(ctx, -sw / 2, -sh / 2, sw, sh, 5 * scale); ctx.fill(); ctx.stroke(); }
+    ctx.restore();
+
+    // Chairs — use manual layout if set, otherwise compute algorithmically
+    const sm = chairMargin * scale;
+    let chairs;
+    if (tteChairsLocal[size]) {
+      chairs = tteChairsLocal[size].map(c => ({ x: cx + c.dx * scale, y: cy + c.dy * scale }));
+    } else {
+      chairs = [];
+      if (isCircle) {
+        for (let i = 0; i < seats; i++) {
+          const a = -Math.PI / 2 + i * 2 * Math.PI / seats;
+          chairs.push({ x: cx + (sw / 2 + sm) * Math.cos(a), y: cy + (sw / 2 + sm) * Math.sin(a) });
+        }
+      } else {
+        const top = Math.ceil(seats / 2), bot = Math.floor(seats / 2);
+        const hy = sh / 2 + sm;
+        for (let i = 0; i < top; i++) { const t = top > 1 ? i / (top - 1) : 0.5; chairs.push({ x: cx + (t - 0.5) * sw * 0.8, y: cy - hy }); }
+        for (let i = 0; i < bot; i++) { const t = bot  > 1 ? i / (bot  - 1) : 0.5; chairs.push({ x: cx + (t - 0.5) * sw * 0.8, y: cy + hy }); }
+      }
+    }
+    chairs.forEach((c, i) => {
+      const dragging = tteDragState && tteDragState.size === size && tteDragState.idx === i;
+      ctx.beginPath(); ctx.arc(c.x, c.y, dragging ? 6 : 4, 0, Math.PI * 2);
+      ctx.fillStyle = dragging ? "rgba(245,166,35,0.9)" : "rgba(255,255,255,0.35)";
+      ctx.fill();
+      if (dragging) { ctx.strokeStyle = "rgba(245,166,35,0.6)"; ctx.lineWidth = 1.5; ctx.stroke(); }
+    });
+    // Manual-mode indicator: dashed border on canvas
+    if (tteChairsLocal[size]) {
+      ctx.save(); ctx.strokeStyle = "rgba(245,166,35,0.4)"; ctx.lineWidth = 1.5;
+      ctx.setLineDash([3, 3]); ctx.strokeRect(1, 1, 98, 98); ctx.restore();
+    }
+  }
+
+  // Find the index of the chair nearest to canvas point (mx,my) within 10px, or -1.
+  function nearestChairIdx(size, mx, my) {
+    const cl = tteChairsLocal[size];
+    if (!cl) return -1;
+    const scale = getTTEScale(size);
+    let best = -1, bestD = 10;
+    cl.forEach((c, i) => {
+      const d = Math.hypot(mx - (50 + c.dx * scale), my - (50 + c.dy * scale));
+      if (d < bestD) { bestD = d; best = i; }
+    });
+    return best;
+  }
+
+  // Sync the Stoelen input to the current chair count when in manual mode.
+  function syncSeatInput(size) {
+    const cl = tteChairsLocal[size];
+    const inp = $("tteS_" + size);
+    if (cl) { inp.value = cl.length; inp.readOnly = true; inp.style.opacity = "0.5"; }
+    else { inp.readOnly = false; inp.style.opacity = ""; }
+  }
+
+  function buildTTEColumn(size, def) {
+    const col = document.createElement("div");
+    col.style.cssText = "display:flex; flex-direction:column; gap:8px; align-items:stretch;";
+
+    const header = document.createElement("div");
+    header.style.cssText = "font-size:11px; text-transform:uppercase; letter-spacing:.1em; color:var(--muted); font-weight:600;";
+    header.textContent = TTE_LABELS[size];
+    col.appendChild(header);
+
+    const preview = document.createElement("canvas");
+    preview.width = 100; preview.height = 100;
+    preview.id = "ttePreview_" + size;
+    preview.style.cssText = "border:1px solid var(--border); border-radius:4px; background:#08080d; align-self:center; cursor:crosshair;";
+    col.appendChild(preview);
+
+    // Chair interaction hint
+    const hint = document.createElement("div");
+    hint.style.cssText = "font-size:9px; color:var(--muted); text-align:center; line-height:1.4;";
+    hint.textContent = "Klik = stoel · Sleep = verplaatsen · Rechtermuisknop = verwijderen";
+    col.appendChild(hint);
+
+    function makeRow(labelText, inputId, value, attrs) {
+      const row = document.createElement("div");
+      row.style.cssText = "display:flex; justify-content:space-between; align-items:center; gap:6px;";
+      const lbl = document.createElement("label");
+      lbl.htmlFor = inputId;
+      lbl.style.cssText = "font-size:11px; color:var(--text); white-space:nowrap;";
+      lbl.textContent = labelText;
+      const inp = document.createElement("input");
+      inp.type = "number"; inp.id = inputId; inp.value = value;
+      inp.style.cssText = "width:56px; background:var(--panel-2,#1a1a2e); color:var(--text); border:1px solid var(--border); border-radius:4px; padding:3px 5px; font-family:var(--mono); font-size:11px;";
+      Object.entries(attrs || {}).forEach(([k, v]) => inp.setAttribute(k, v));
+      row.appendChild(lbl); row.appendChild(inp);
+      return row;
+    }
+
+    col.appendChild(makeRow("Breedte (px)", "tteW_" + size, def.w, { min: 40, max: 180, step: 5 }));
+    col.appendChild(makeRow("Hoogte (px)",  "tteH_" + size, def.h, { min: 40, max: 180, step: 5 }));
+    col.appendChild(makeRow("Stoelen",      "tteS_" + size, def.seats, { min: 1, max: 12, step: 1 }));
+
+    const shapeDiv = document.createElement("div");
+    shapeDiv.style.cssText = "display:flex; gap:12px; align-items:center;";
+    ["rect", "circle"].forEach(shapeVal => {
+      const label = document.createElement("label");
+      label.style.cssText = "display:flex; align-items:center; gap:4px; cursor:pointer; font-size:11px;";
+      const radio = document.createElement("input");
+      radio.type = "radio";
+      radio.name = "tteShape_" + size;
+      radio.value = shapeVal;
+      radio.id = "tteShape_" + size + "_" + shapeVal;
+      radio.checked = (def.shape === shapeVal);
+      radio.style.accentColor = "var(--accent)";
+      label.appendChild(radio);
+      label.appendChild(document.createTextNode(shapeVal === "rect" ? "Rechthoek" : "Rond"));
+      shapeDiv.appendChild(label);
+    });
+    col.appendChild(shapeDiv);
+
+    // "↺ Auto" reset button — clears manual chair layout
+    const resetBtn = document.createElement("button");
+    resetBtn.className = "secondary";
+    resetBtn.style.cssText = "font-size:10px; padding:3px 6px; margin:0;";
+    resetBtn.textContent = "↺ Auto stoelen";
+    resetBtn.addEventListener("click", () => {
+      tteChairsLocal[size] = null;
+      syncSeatInput(size);
+      drawTTEPreview(size);
+    });
+    col.appendChild(resetBtn);
+
+    // Wire live preview for non-chair inputs
+    col.querySelectorAll("input").forEach(inp => {
+      inp.addEventListener("input",  () => { syncCircleH(size); drawTTEPreview(size); });
+      inp.addEventListener("change", () => { syncCircleH(size); drawTTEPreview(size); });
+    });
+
+    // Initial h-disabled state
+    if (def.shape === "circle") $("tteH_" + size).disabled = true;
+
+    // ---- Interactive chair placement on preview canvas ----
+    function canvasCoords(e) {
+      const r = preview.getBoundingClientRect();
+      return {
+        x: (e.clientX - r.left) * (100 / r.width),
+        y: (e.clientY - r.top)  * (100 / r.height),
+      };
+    }
+
+    preview.addEventListener("mousedown", e => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      const { x: mx, y: my } = canvasCoords(e);
+      const scale = getTTEScale(size);
+
+      // Ensure manual mode is initialised from algorithm on first interaction.
+      if (!tteChairsLocal[size]) tteChairsLocal[size] = getAutoChairs(size);
+
+      const idx = nearestChairIdx(size, mx, my);
+      if (idx !== -1) {
+        // Start drag
+        tteDragState = { size, idx };
+      } else {
+        // Add new chair
+        tteChairsLocal[size].push({ dx: (mx - 50) / scale, dy: (my - 50) / scale });
+        syncSeatInput(size);
+        drawTTEPreview(size);
+      }
+    });
+
+    preview.addEventListener("mousemove", e => {
+      if (!tteDragState || tteDragState.size !== size) return;
+      const { x: mx, y: my } = canvasCoords(e);
+      const scale = getTTEScale(size);
+      tteChairsLocal[size][tteDragState.idx] = { dx: (mx - 50) / scale, dy: (my - 50) / scale };
+      drawTTEPreview(size);
+    });
+
+    preview.addEventListener("mouseup",    () => { tteDragState = null; });
+    preview.addEventListener("mouseleave", () => { tteDragState = null; });
+
+    preview.addEventListener("contextmenu", e => {
+      e.preventDefault();
+      const { x: mx, y: my } = canvasCoords(e);
+      if (!tteChairsLocal[size]) tteChairsLocal[size] = getAutoChairs(size);
+      const idx = nearestChairIdx(size, mx, my);
+      if (idx !== -1) {
+        tteChairsLocal[size].splice(idx, 1);
+        syncSeatInput(size);
+        drawTTEPreview(size);
+      }
+    });
+
+    return col;
+  }
+
+  function syncCircleH(size) {
+    const isCircle = $("tteShape_" + size + "_circle").checked;
+    const hInp = $("tteH_" + size);
+    hInp.disabled = isCircle;
+    if (isCircle) hInp.value = $("tteW_" + size).value;
+  }
+
+  function openTTEModal() {
+    const cols = $("tteCols");
+    cols.innerHTML = "";
+    tteDragState = null;
+    ["small", "medium", "large"].forEach(size => {
+      const def = getTableTypeDef(size);
+      // Restore saved manual chair layout if present.
+      tteChairsLocal[size] = (def.chairs_local && def.chairs_local.length > 0)
+        ? def.chairs_local.map(c => ({ dx: c.dx, dy: c.dy }))
+        : null;
+      const col = buildTTEColumn(size, def);
+      cols.appendChild(col);
+      syncSeatInput(size);
+      drawTTEPreview(size);
+    });
+    $("tableTypeModal").style.display = "flex";
+  }
+
+  function closeTTEModal() {
+    tteDragState = null;
+    $("tableTypeModal").style.display = "none";
+  }
+
+  function applyTTEModal() {
+    ["small", "medium", "large"].forEach(size => {
+      const isCircle = $("tteShape_" + size + "_circle").checked;
+      const w = Math.max(40, Math.min(180, parseInt($("tteW_" + size).value, 10) || 60));
+      const h = isCircle ? w : Math.max(40, Math.min(180, parseInt($("tteH_" + size).value, 10) || 60));
+      const cl = tteChairsLocal[size];
+      tableTypeDefs[size] = {
+        w, h,
+        seats: cl ? cl.length : Math.max(1, Math.min(12, parseInt($("tteS_" + size).value, 10) || 2)),
+        shape: isCircle ? "circle" : "rect",
+        chairs_local: cl ? cl.map(c => ({ dx: c.dx, dy: c.dy })) : null,
+      };
+    });
+    try { localStorage.setItem("restaurantSim.tableTypes", JSON.stringify(tableTypeDefs)); } catch (e) {}
+    updateSeatLabels();
+    closeTTEModal();
+    refreshScenePreview();
+  }
+
+  function resetTTEDefs() {
+    tableTypeDefs = JSON.parse(JSON.stringify(DEFAULT_TABLE_TYPE_DEFS));
+    tteChairsLocal = { small: null, medium: null, large: null };
+    ["small", "medium", "large"].forEach(size => {
+      const def = DEFAULT_TABLE_TYPE_DEFS[size];
+      $("tteW_" + size).value = def.w;
+      $("tteH_" + size).value = def.h;
+      $("tteS_" + size).value = def.seats;
+      $("tteShape_" + size + "_rect").checked   = (def.shape === "rect");
+      $("tteShape_" + size + "_circle").checked = (def.shape === "circle");
+      $("tteH_" + size).disabled = (def.shape === "circle");
+      syncSeatInput(size);
+      drawTTEPreview(size);
+    });
+  }
+
+  $("tableTypeEditorBtn").addEventListener("click", openTTEModal);
+  $("tteApplyBtn").addEventListener("click", applyTTEModal);
+  $("tteResetBtn").addEventListener("click", resetTTEDefs);
+  $("tteCancelBtn").addEventListener("click", closeTTEModal);
+  $("tableTypeModal").addEventListener("click", e => { if (e.target === $("tableTypeModal")) closeTTEModal(); });
+
+  // ---------------------------------------------------------------
+  //  Batch generator UI
+  // ---------------------------------------------------------------
+  const batch = new BatchRunner(engine);
+
+  // Verdeelt `units` losse tafels willekeurig in groepen van 1–4 (samengeschoven).
+  // Geeft een array terug zoals [{ type: "comb2", count: 3 }, { type: "comb1", count: 2 }].
+  function partitionIntoGroups(units) {
+    const counts = {};
+    let rem = units;
+    while (rem > 0) {
+      const size = Math.min(rem, 1 + Math.floor(Math.random() * 4));
+      const key = `comb${size}`;
+      counts[key] = (counts[key] || 0) + 1;
+      rem -= size;
+    }
+    return Object.entries(counts).map(([type, count]) => ({ type, count }));
+  }
+
+  function randomBatchConfig() {
+    const roomWs     = [560, 600, 640, 700, 760, 800, 860];
+    const roomHs     = [480, 520, 560, 600, 640, 700, 760];
+    const partyTypes = ["receptie", "buffet", "feestavond"];
+    const roomW     = roomWs[Math.floor(Math.random() * roomWs.length)];
+    const roomH     = roomHs[Math.floor(Math.random() * roomHs.length)];
+    const partyType = partyTypes[Math.floor(Math.random() * 3)];
+    const guests    = 10 + Math.floor(Math.random() * 71);   // 10–80
+    const waiters   = 1  + Math.floor(Math.random() * 5);    // 1–5
+
+    // 8 losse tafels, willekeurig samengeschoven in groepen van 1–4.
+    const tableGroups = partitionIntoGroups(8);
+    let seats = tableGroups.reduce((s, g) => s + g.count * getTableTypeDef(g.type).seats, 0);
+    // Voeg losse tafels toe totdat er genoeg stoelen zijn.
+    while (seats < guests) {
+      tableGroups.push({ type: "comb1", count: 1 });
+      seats += 2;
+    }
+
+    return { roomW, roomH, guests, waiters, tSmall: 0, tMedium: 0, tLarge: 0, tableGroups, partyType, gridSize: 24 };
+  }
+
+  $("batchStartBtn").addEventListener("click", () => {
+    const total = Math.max(1, parseInt($("batchCount").value, 10) || 100);
+    const seeds = Math.max(1, parseInt($("batchSeeds").value, 10) || 5);
+    const mode  = $("batchConfigMode").value;
+    const base  = readConfig();
+
+    engine.pause();
+    $("batchStartBtn").style.display     = "none";
+    $("batchStopBtn").style.display      = "";
+    $("batchExportBtn").style.display    = "none";
+    $("batchProgressWrap").style.display = "";
+    $("batchBar").style.width            = "0%";
+    $("batchStatus").textContent         = `0 / ${total}`;
+
+    batch.start({
+      total,
+      seedsPerLayout: seeds,
+      configFn: () => mode === "random" ? randomBatchConfig() : { ...base },
+      onProgress: (done, tot, r) => {
+        $("batchBar").style.width    = `${(done / tot * 100).toFixed(1)}%`;
+        $("batchStatus").textContent =
+          `${done} / ${tot}  (gem. score: ${r.metrics.score.toFixed(0)}, ${r.seeds.length} seeds)`;
+      },
+      onFinish: (results) => {
+        $("batchStartBtn").style.display  = "";
+        $("batchStopBtn").style.display   = "none";
+        $("batchExportBtn").style.display = "";
+        $("batchBar").style.width         = "100%";
+        $("batchStatus").textContent      = `Klaar — ${results.length} layouts gegenereerd.`;
+        engine.resume();
+      },
+    });
+  });
+
+  $("batchStopBtn").addEventListener("click", () => {
+    batch.stop();
+    $("batchStartBtn").style.display  = "";
+    $("batchStopBtn").style.display   = "none";
+    $("batchExportBtn").style.display = batch.results.length ? "" : "none";
+    $("batchStatus").textContent      = `Gestopt bij ${batch.done} / ${batch.total} runs.`;
+    engine.resume();
+  });
+
+  $("batchExportBtn").addEventListener("click", () => batch.exportJSON());
+
+  // ---------------------------------------------------------------
+  //  Optimizer validatie — laad optimizer-results.json en simuleer
+  //  de geselecteerde layout met N seeds voor echte score-verificatie.
+  // ---------------------------------------------------------------
+  let optData = null;
+
+  $("optLoadBtn").addEventListener("click", () => $("optFile").click());
+
+  $("optFile").addEventListener("change", (ev) => {
+    const f = ev.target.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        optData = JSON.parse(e.target.result);
+        const sel = $("optSelect");
+        sel.innerHTML = optData.map(r =>
+          `<option value="${r.rank - 1}">#${r.rank}  score≈${r.predicted_score.toFixed(0)}  dist≈${(r.predicted_waiterDist / 1000).toFixed(0)}k px</option>`
+        ).join("");
+        $("optPanel").style.display = "";
+        refreshOptPred();
+      } catch (err) {
+        alert("Fout bij laden: " + err.message);
+      }
+    };
+    reader.readAsText(f);
+  });
+
+  $("optSelect").addEventListener("change", refreshOptPred);
+
+  function refreshOptPred() {
+    if (!optData) return;
+    const r = optData[parseInt($("optSelect").value)];
+    $("optPred").textContent =
+      `Voorspeld: dist ≈ ${r.predicted_waiterDist.toLocaleString()} px  |  score ≈ ${r.predicted_score.toFixed(0)}`;
+  }
+
+  $("optValidateBtn").addEventListener("click", () => {
+    if (!optData) return;
+    const r        = optData[parseInt($("optSelect").value)];
+    const nSeeds   = Math.max(1, parseInt($("optSeeds").value) || 5);
+    const varTables = r.tables.filter(t => t.size !== "custom");
+
+    const cfg = {
+      roomW:       r.config.roomW,
+      roomH:       r.config.roomH,
+      guests:      r.config.guests,
+      waiters:     r.config.waiters,
+      tSmall:      0,
+      tMedium:     0,
+      tLarge:      0,
+      partyType:   r.config.partyType || "buffet",
+      gridSize:    24,
+      forcedLayout: varTables,
+    };
+
+    engine.pause();
+    $("optValidateBtn").disabled = true;
+    $("optResult").textContent   = `Bezig (0/${nSeeds} seeds)…`;
+
+    const valBatch = new BatchRunner(engine);
+    valBatch.start({
+      total:          nSeeds,
+      seedsPerLayout: 1,
+      configFn:       () => cfg,
+      onProgress: (done, tot) => {
+        $("optResult").textContent = `Bezig (${done}/${tot} seeds)…`;
+      },
+      onFinish: (results) => {
+        const scores = results.map(x => x.metrics.score);
+        const dists  = results.map(x => x.metrics.waiterDist);
+        const avgSc  = scores.reduce((a, b) => a + b, 0) / scores.length;
+        const avgDist = dists.reduce((a, b) => a + b, 0) / dists.length;
+        const errDist = Math.round(Math.abs(avgDist - r.predicted_waiterDist));
+        const errPct  = (errDist / r.predicted_waiterDist * 100).toFixed(0);
+        $("optResult").innerHTML =
+          `<b>Actueel (${nSeeds} seeds gem.):</b><br>` +
+          `dist:  ${Math.round(avgDist).toLocaleString()} px<br>` +
+          `score: ${avgSc.toFixed(0)}<br>` +
+          `<br><b>Voorspelling vs actueel:</b><br>` +
+          `dist-fout: ${errDist.toLocaleString()} px (${errPct}%)<br>` +
+          `score-fout: ${(avgSc - r.predicted_score).toFixed(0)}`;
+        $("optValidateBtn").disabled = false;
+        engine.resume();
+      },
+    });
+  });
+
+  // ---------------------------------------------------------------
+  //  Metrics refresh — once per second on a setInterval. Pulling
+  //  numbers off the engine rather than computing here keeps the
+  //  data flow one-way.
+  // ---------------------------------------------------------------
+  const AUTO_RESTART_SIM_SECS = 5 * 3600; // 5 simulated hours
+  let autoRestartArmed = true; // rearms at the start of each run (simTime < threshold)
+
+  setInterval(() => {
+    const m = engine.metrics;
+    $("mTime").textContent = engine._clockText();
+
+    const avg = m.waitSamples ? (m.waitSum / m.waitSamples) : 0;
+    $("mWait").textContent = m.waitSamples ? avg.toFixed(1) + "s" : "—";
+    $("mDist").textContent = Math.round(m.waiterDist) + " px";
+
+    const impEl = $("mImp");
+    impEl.textContent = m.impatient;
+    impEl.classList.toggle("bad",  m.impatient >= 5);
+    impEl.classList.toggle("warn", m.impatient > 0 && m.impatient < 5);
+
+    $("mServed").textContent = m.totalServed;
+    $("mLeft").textContent   = m.totalLeft;
+
+    // Party info
+    $("mParty").textContent = engine.partyType ? engine.partyType.label : "—";
+    $("mPartyDur").textContent = engine.partyEndSimTime ? Math.round(engine.partyEndSimTime / 60) + " min" : "—";
+
+    const score = engine.efficiencyScore();
+    engine.metrics.score = score;
+    $("mScore").textContent = score;
+    if (score > engine.bestScore) engine.bestScore = score;
+    $("mBest").textContent = engine.bestScore === -Infinity ? "—" : engine.bestScore;
+    $("mRun").textContent = engine.runIndex;
+    $("mSeed").textContent = engine.seed;
+    updateLastSeed();
+
+    // Auto-restart: rearm while below threshold, fire once when crossed.
+    if (engine.simTime < AUTO_RESTART_SIM_SECS) {
+      autoRestartArmed = true;
+    } else if (autoRestartArmed) {
+      autoRestartArmed = false;
+      const cfg = readConfig();
+      if (checkSeats(cfg)) {
+        engine.start(cfg);
+        if (engine.layoutError) {
+          $("seatError").textContent = engine.layoutError;
+          $("seatError").style.display = "block";
+        } else {
+          $("seatError").style.display = "none";
+        }
+      }
+    }
+  }, 1000);
+})();
+</script>
+</body>
+</html>
