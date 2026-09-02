@@ -69,7 +69,9 @@ async function runValidation(page, layout, nSeeds) {
           const impatient= results.map(r => r.metrics.impatient);
           const valid    = results.map(r => r.metrics.layoutValid);
           const unreach  = results.map(r => r.metrics.unreachableTables);
+          const trapped  = results.map(r => r.metrics.trappedWaiters);
           const failures = results.map(r => r.metrics.pathFailures);
+          const wFail    = results.map(r => r.metrics.waiterPathFailures);
           const avg      = arr => arr.reduce((a, b) => a + b, 0) / arr.length;
           // Bouw trainingsdata-entries per seed (zelfde formaat als batch export)
           const trainingRuns = results.map(r => ({
@@ -98,7 +100,11 @@ async function runValidation(page, layout, nSeeds) {
             // aan als 0 -- vergelijken met === false zou altijd waar zijn.
             layout_valid:       valid.every(v => Boolean(v)),
             unreachable_tables: Math.max(0, ...unreach.map(u => u || 0)),
+            trapped_waiters:    Math.max(0, ...trapped.map(t => t || 0)),
             path_failures:      Math.max(0, ...failures.map(f => f || 0)),
+            // Alleen oberroutes bepalen waiterDist; een ober die geen route
+            // vindt blijft staan en maakt de layout kunstmatig goedkoop.
+            waiter_path_failures: Math.max(0, ...wFail.map(f => f || 0)),
             tables:         layout.tables,
             config:         cfg,
             trainingRuns,
@@ -134,79 +140,10 @@ async function runValidation(page, layout, nSeeds) {
   console.log('Simulator laden…');
   await page.goto(SIM_URL, { waitUntil: 'networkidle' });
 
-  // Wacht tot de engine klaar is en stel hem bloot
-  await page.evaluate(() => {
-    // De engine zit in de IIFE — we maken hem globaal toegankelijk via een hook
-    // door een custom event te sturen; de engine is al gecreëerd bij DOMContentLoaded
-    if (!window.__engine) {
-      // Zoek de engine via de BatchRunner (die een referentie heeft)
-      window.__engine = window._sim_engine || null;
-    }
-  });
-
-  // Expose engine via window (de engine mist een globale referentie — patch dat)
-  await page.evaluate(() => {
-    // Simulatie is al gestart; canvas is beschikbaar — zoek SimulationEngine instantie
-    // via de BatchRunner die al in scope is na DOMContentLoaded
-    if (!window.__engine) {
-      // Fallback: stuur een engine-expose event
-      const origBatch = BatchRunner;
-      window.__engine = null;
-      // Haal engine op via het canvas element (SimulationEngine slaat canvas op)
-      const canvas = document.getElementById('stage');
-      if (canvas && canvas._engine) window.__engine = canvas._engine;
-    }
-  });
-
-  // Betrouwbaardere methode: patch SimulationEngine constructor vóór laden
-  // Herlaad pagina met engine-expose script geïnjecteerd
-  await page.addInitScript(() => {
-    window.__engineReady = false;
-    const origConsole = console.log;
-    // Wacht op SimulationEngine creatie door te patchen via prototype
-    Object.defineProperty(window, '__setEngine', {
-      set(v) { window.__engine = v; window.__engineReady = true; }
-    });
-  });
-
-  // Herlaad zodat het init script actief is
-  await page.reload({ waitUntil: 'networkidle' });
-
-  // Patch na laden: zoek engine in globale scope van de IIFE
-  const engineFound = await page.evaluate(() => {
-    // De IIFE heeft `const engine = new SimulationEngine(...)` — niet globaal.
-    // We moeten via BatchRunner of via een workaround.
-    // Simpelste oplossing: definieer een globale factory-hook in SimulationEngine.
-    // Maar die is al gecreëerd... gebruik de batch knop's click handler als proxy.
-
-    // Alternatief: zoek via onclick handlers of event listeners.
-    // Meest betrouwbaar: BatchRunner is ook niet globaal.
-    // Laten we de engine blootstellen via een workaround:
-    // We roepen _batchStart direct aan op het engine object dat we vinden
-    // door het tijdelijk uit te lezen via de batchStartBtn listener.
-
-    // Werkende aanpak: overschrijf BatchRunner.prototype.start zodat we engine opvangen
-    if (typeof BatchRunner !== 'undefined') {
-      const orig = BatchRunner.prototype.start;
-      BatchRunner.prototype.start = function(opts) {
-        window.__engine = this.engine;
-        return orig.call(this, opts);
-      };
-      // Trigger een dummy click om de engine te exposen
-      const btn = document.getElementById('batchStartBtn');
-      if (btn) {
-        // Sla de echte handler op en simuleer een start+stop
-        btn.click();
-        setTimeout(() => document.getElementById('batchStopBtn')?.click(), 0);
-      }
-      return true;
-    }
-    return false;
-  });
-
-  // Kleine pauze voor engine-expose
-  await sleep(500);
-
+  // simulatie.html zet window.__engine zelf klaar (zie de haak vlak na
+  // `new SimulationEngine`). Voorheen viste dit script de engine uit een
+  // klik-handler op batchStartBtn; dat werkte, maar brak stil zodra de UI
+  // veranderde en startte ongevraagd een echte batch.
   const hasEngine = await page.evaluate(() => !!window.__engine);
   if (!hasEngine) {
     console.error('Engine niet gevonden in pagina-scope. Controleer of simulatie geladen is.');

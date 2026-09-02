@@ -40,7 +40,7 @@ def main():
         return
 
     runs, seen = [], set()
-    invalid = dupes = 0
+    invalid = dupes = failed = 0
     for f in files:
         try:
             entries = json.loads(f.read_text())
@@ -55,8 +55,19 @@ def main():
             seen.add(key)
             m = r.get("metrics", {})
             # BatchRunner middelt metrics numeriek, dus false komt aan als 0.
+            #
+            # Twee filters, en de tweede is geen luxe. layoutValid is een
+            # statische toets vooraf; waiterPathFailures telt wat er tijdens de
+            # run echt misging. Een ober die geen route vindt blijft staan en
+            # legt nul afstand af -- dat is de goedkoopste layout die er
+            # bestaat, en precies de exploit die we dichttimmeren. Alles wat
+            # een van beide toetsen niet haalt, hoort niet in de trainingsdata.
             if not m.get("layoutValid", 1):
                 invalid += 1
+                if not args.keep_invalid:
+                    continue
+            elif m.get("waiterPathFailures", 0):
+                failed += 1
                 if not args.keep_invalid:
                     continue
             runs.append(r)
@@ -69,6 +80,8 @@ def main():
     print(f"  runs bewaard      : {len(runs):,}  ({layouts:,} unieke layouts)")
     print(f"  duplicaten weg    : {dupes:,}")
     print(f"  ongeldige layouts : {invalid:,} "
+          f"({'behouden' if args.keep_invalid else 'verwijderd'})")
+    print(f"  oberroute mislukt : {failed:,} "
           f"({'behouden' if args.keep_invalid else 'verwijderd'})")
     print(f"  geschreven naar   : {out}")
 

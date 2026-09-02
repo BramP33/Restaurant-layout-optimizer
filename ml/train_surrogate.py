@@ -36,7 +36,10 @@ MODEL_FILE = ROOT / "surrogate_model.pkl"
 OOF_FILE   = ROOT / "surrogate-oof.json"   # out-of-fold voorspellingen voor evaluate.py
 
 BAR_DOCK_X = 640 - 110   # 530
-BAR_DOCK_Y = 640 / 2     # 320 — consistent met optimizer
+# 80, niet 320: simulatie.html:1153 legt de dock bovenaan de bar, niet in
+# het midden. Met 320 wees elke bar-feature naar een punt waar de obers
+# nooit staan.
+BAR_DOCK_Y = 80
 
 
 # ── Data laden ────────────────────────────────────────────────────────────────

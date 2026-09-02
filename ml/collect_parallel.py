@@ -10,8 +10,15 @@ resultaten in een eigen shard-bestand schrijven. Niets wordt gedeeld, dus er
 valt niets te racen. Achteraf voegt merge_shards.py alles samen.
 
 Elke run krijgt de bereikbaarheidsvlaggen mee (layoutValid, unreachableTables,
-pathFailures) zodat onbruikbare indelingen later gefilterd kunnen worden in
-plaats van als goedkope layouts in de training te belanden.
+trappedWaiters, pathFailures, waiterPathFailures) zodat onbruikbare indelingen
+later gefilterd kunnen worden in plaats van als goedkope layouts in de training
+te belanden.
+
+Kandidaten worden bovendien vooraf gezeefd met pathgrid.layout_valid(), de
+Python-spiegel van de bereikbaarheidscheck in de simulator. Op de bestaande
+dataset is ongeveer twee derde van de willekeurige indelingen onbruikbaar; die
+vooraf weggooien scheelt evenveel rekentijd, en de zeef kost milliseconden
+tegenover seconden voor een simulatie.
 
 Gebruik:
     python3 collect_parallel.py --workers 8 --hours 8
@@ -50,14 +57,27 @@ def generate_batch_file(n, out_path, rng_seed):
     sys.path.insert(0, str(HERE))
     from optimize_layout import generate_batch, ROOM_W, ROOM_H
 
+    import pathgrid as pg
+
     rng = np.random.default_rng(rng_seed)
-    layouts = []
+    layouts, seen, rejected = [], 0, 0
     for _ in range(20):
         batch, _hit = generate_batch(n * 3, rng)
-        layouts.extend(batch)
+        for layout in batch:
+            seen += 1
+            # Zeef vooraf: een indeling waarin een ober opgesloten staat of een
+            # tafel onbereikbaar is, hoeft niet gesimuleerd te worden. De
+            # uitkomst zou toch weggegooid worden door merge_shards.
+            valid, _unreach, _trapped = pg.layout_valid(pg.build_blocked(layout), layout)
+            if valid:
+                layouts.append(layout)
+            else:
+                rejected += 1
         if len(layouts) >= n:
             break
     layouts = layouts[:n]
+    if seen:
+        print(f"  zeef: {rejected}/{seen} kandidaten vooraf afgekeurd", flush=True)
     if not layouts:
         return 0
 

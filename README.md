@@ -14,6 +14,12 @@ The ML pipeline collects thousands of these simulation runs, trains a surrogate 
 
 **Result: 31% reduction in waiter travel distance** (367k → 253k pixels), found through surrogate-guided optimization and confirmed via headless browser validation.
 
+> **Status: this number is being re-measured.** The optimizer turned out to be exploiting a
+> pathfinding fallback rather than finding a better floor plan — see
+> [Reward hacking](#reward-hacking-the-optimizer-found-a-bug-not-a-layout) below. The simulator has
+> been fixed and the dataset is being re-collected; the headline figure above still comes from the
+> old, exploited runs.
+
 ---
 
 ## Demo
@@ -121,6 +127,44 @@ Candidate layouts from the optimizer are validated by actually running the simul
 | Efficiency score | ~−3,800 | ~−3,007 |
 
 **Best layout pattern:** All 8 variable tables rotated 90°, concentrated toward the right side of the room (near the bar dock). 6 of 8 tables placed at x > 300, minimizing waiter round-trip distance to the bar.
+
+---
+
+## Reward hacking: the optimizer found a bug, not a layout
+
+`PathNavigator.findPath` used to return a straight line to the destination when no route
+existed. A straight line is shorter than any real path, so walling in the bar dock scored
+*better* than an efficient floor plan — and the optimizer found that out. Every one of the
+top 50 layouts by waiter distance encloses the dock.
+
+Three things had to change, because closing the fallback naively makes the exploit worse
+rather than better — a waiter with no route walks 0 px, which is cheaper still:
+
+1. **A failed search returns a partial route**, not a straight line, and sets `path.failed`.
+   The agent stays put instead of clipping through furniture.
+2. **A validity check marks unusable layouts invalid** instead of scoring them cheap. It is a
+   connected-component analysis over the walkable grid: all waiters must share one floor, the
+   bar approach point must lie in it, and every table must have a service point in it. A
+   blocked cell is never a bridge — an agent can step *off* furniture but not *through* it,
+   and treating the dock cell as a through-route was what made an enclosed bar look reachable.
+3. **The pipeline filters on both signals.** `layoutValid` is the static check; the run also
+   reports `waiterPathFailures`, which counts routes that actually failed during the
+   simulation. `merge_shards.py` drops a run that fails either test.
+
+On the old dataset, 65% of layouts are invalid under this check — including all of the top 50.
+The cheapest *valid* layout runs 333,694 px against the 253,102 px of the best exploited one,
+which is why the whole dataset is being collected again.
+
+Two regression tests guard this:
+
+```bash
+node ml/test_reachability.js --sample 250   # geldig => geen enkele mislukte oberroute
+python3 ml/test_pathgrid.py                 # Python-spiegel == simulator, layout voor layout
+```
+
+`test_reachability.js` asserts the property that matters: a layout the simulator calls valid
+must not produce a single failed waiter route. Guest routes may still fail (a chair behind a
+wall) — those are reported separately and do not affect waiter distance.
 
 ---
 

@@ -44,6 +44,34 @@ _SQRT2 = 1.414                          # exact de constante uit de simulator
 
 # ── Meubelgeometrie ──────────────────────────────────────────────────────────
 
+# Zoals DEFAULT_TABLE_TYPE_DEFS in simulatie.html:494. `new Table(id, size, ...)`
+# negeert de w/h/seats die in een datasetrecord staan en haalt ze hieruit op.
+# Records uit een sessie met aangepaste tafeltypes in localStorage dragen dus
+# afmetingen die een verse browser nooit reproduceert; wie het record gelooft,
+# rekent features op andere geometrie dan de target gemeten is.
+TABLE_TYPE_DEFS = {
+    "small":  {"w":  60, "h": 60, "seats": 2},
+    "medium": {"w":  80, "h": 60, "seats": 4},
+    "large":  {"w": 110, "h": 70, "seats": 6},
+    "comb1":  {"w":  60, "h": 60, "seats": 2},
+    "comb2":  {"w": 120, "h": 60, "seats": 4},
+    "comb3":  {"w": 180, "h": 60, "seats": 6},
+    "comb4":  {"w": 240, "h": 60, "seats": 8},
+}
+
+
+def normalise_table(t):
+    """Afmetingen uit het tafeltype halen, niet uit het record."""
+    d = TABLE_TYPE_DEFS.get(t.get("size"))
+    if d is None:                       # "custom": alleen het record weet het
+        return t
+    if t.get("w") == d["w"] and t.get("h") == d["h"] and t.get("seats") == d["seats"]:
+        return t
+    out = dict(t)
+    out.update(d)
+    return out
+
+
 def table_aabb(t):
     """AABB van de geroteerde tafel — zelfde formule als Table.rect()."""
     cx, cy = t["x"] + t["w"] / 2, t["y"] + t["h"] / 2
@@ -86,7 +114,7 @@ def build_blocked(tables):
         nonlocal blocked
         blocked |= (xs >= x) & (xs <= x + w) & (ys >= y) & (ys <= y + h)
 
-    for t in tables:
+    for t in map(normalise_table, tables):
         ax, ay, aw, ah = table_aabb(t)
         add(ax - 8, ay - 8, aw + 16, ah + 16)
         for cx, cy in table_chairs(t):
@@ -120,6 +148,116 @@ def nearest_open(blocked, p, radius=3):
     return None
 
 
+def components(blocked):
+    """
+    Labelt elke vrije cel met het nummer van zijn samenhangende component.
+    Spiegel van PathNavigator.components() in simulatie.html.
+
+    Geen enkele geblokkeerde cel doet mee, ook een startcel niet: findPath
+    vrijwaart de startcel alleen zolang de route loopt, dus een agent kan er
+    afstappen maar er nooit doorheen. Wie een geblokkeerde cel wel als
+    doorgang telt, plakt gebieden aan elkaar die nooit verbonden zijn -- en
+    daar kroop de optimizer in.
+    """
+    label = np.full((ROWS, COLS), -1, dtype=np.int32)
+    sizes = []
+    for r0 in range(ROWS):
+        for c0 in range(COLS):
+            if blocked[r0, c0] or label[r0, c0] >= 0:
+                continue
+            cid = len(sizes)
+            label[r0, c0] = cid
+            stack = [(r0, c0)]
+            n = 0
+            while stack:
+                r, c = stack.pop()
+                n += 1
+                for dr in (-1, 0, 1):
+                    for dc in (-1, 0, 1):
+                        if dr == 0 and dc == 0:
+                            continue
+                        nr, nc = r + dr, c + dc
+                        if not (0 <= nr < ROWS and 0 <= nc < COLS) or blocked[nr, nc]:
+                            continue
+                        if dr and dc and (blocked[r, nc] or blocked[nr, c]):
+                            continue          # hoekregel, gelijk aan findPath
+                        if label[nr, nc] >= 0:
+                            continue
+                        label[nr, nc] = cid
+                        stack.append((nr, nc))
+            sizes.append(n)
+    return label, sizes
+
+
+def entry_components(blocked, label, p):
+    """De componenten waarin een agent op punt p terecht kan komen."""
+    r0, c0 = point_to_cell(p)
+    if not blocked[r0, c0]:
+        return {int(label[r0, c0])}
+    out = set()
+    for dr in (-1, 0, 1):
+        for dc in (-1, 0, 1):
+            if dr == 0 and dc == 0:
+                continue
+            nr, nc = r0 + dr, c0 + dc
+            if not (0 <= nr < ROWS and 0 <= nc < COLS) or blocked[nr, nc]:
+                continue
+            if dr and dc:
+                # De startcel telt hier als vrij, net als in walkable().
+                a = (nr, c0) == (r0, c0) or not blocked[nr, c0]
+                b = (r0, nc) == (r0, c0) or not blocked[r0, nc]
+                if not (a and b):
+                    continue
+            out.add(int(label[nr, nc]))
+    return out
+
+
+def waiter_floor(blocked, n_waiters=3):
+    """
+    De gedeelde loopvloer van de obers: de grootste component waar ze alle
+    drie in kunnen komen. None als die niet bestaat -- dan staat er minstens
+    een ober opgesloten en is de layout ongeldig.
+    """
+    label, sizes = components(blocked)
+    common = None
+    for i in range(n_waiters):
+        spawn = (BAR_DOCK[0], BAR_DOCK[1] + i * 22)
+        e = entry_components(blocked, label, spawn)
+        common = e if common is None else (common & e)
+        if not common:
+            return label, sizes, None
+    floor = max(common, key=lambda cid: sizes[cid])
+    return label, sizes, floor
+
+
+def layout_valid(blocked, tables, n_waiters=3):
+    """
+    Spiegel van SimulationEngine._checkLayoutReachability(). Geeft
+    (valid, unreachable_tables, trapped_waiters).
+    """
+    label, sizes, floor = waiter_floor(blocked, n_waiters)
+    if floor is None:
+        return False, len(tables), n_waiters
+    trapped = 0
+    for i in range(n_waiters):
+        spawn = (BAR_DOCK[0], BAR_DOCK[1] + i * 22)
+        if floor not in entry_components(blocked, label, spawn):
+            trapped += 1
+
+    def in_floor(p):
+        cell = nearest_open(blocked, p, radius=5)
+        return cell is not None and int(label[cell]) == floor
+
+    if sizes[floor] < 10 or not in_floor(BAR_DOCK):
+        return False, len(tables), trapped
+
+    unreachable = 0
+    for t in tables:
+        if not any(in_floor(p) for p in service_points(t)):
+            unreachable += 1
+    return unreachable == 0 and trapped == 0, unreachable, trapped
+
+
 def distance_field(blocked, start_point):
     """
     Dijkstra vanaf start_point over het vrije grid. Geeft (ROWS, COLS) in
@@ -129,11 +267,13 @@ def distance_field(blocked, start_point):
     dit betaalbaar is voor duizenden layouts.
     """
     dist = np.full((ROWS, COLS), np.inf)
-    # Exacte cel, niet nearest_open: anders springt het startpunt over een
-    # muur heen en lijkt een ingesloten dock bereikbaar. De cel zelf mag
-    # geblokkeerd zijn (A* staat de startcel toe), maar de agent moet er via
-    # een vrije buur uit kunnen.
-    start = point_to_cell(start_point)
+    # De obers lopen naar nearestOpenPoint(dock, 5), niet naar de dockcel zelf;
+    # dat punt is dus het eerlijke vertrekpunt. Een geblokkeerde cel mag nooit
+    # het zaad zijn: dan sijpelt de sweep naar buiten via een cel waar niemand
+    # doorheen kan.
+    start = nearest_open(blocked, start_point, radius=5)
+    if start is None:
+        return dist
 
     dist[start] = 0.0
     heap = [(0.0, start[0], start[1])]
@@ -165,6 +305,7 @@ def distance_field(blocked, start_point):
 
 def service_points(t):
     """De acht aanlooppunten rond een tafel — zoals _servicePoint()."""
+    t = normalise_table(t)
     cx, cy = t["x"] + t["w"] / 2, t["y"] + t["h"] / 2
     g = 26
     x0, y0, w, h = t["x"], t["y"], t["w"], t["h"]

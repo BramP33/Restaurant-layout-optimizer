@@ -600,6 +600,7 @@ class PathNavigator {
     this.blocked = new Set();
     this.obstacles = [];
     this.pathFailures = 0;              // routes die onmogelijk bleken
+    this._components  = null;           // lazy componentlabels (zie components())
     this._buildObstacles(tables, bar, userObstacles);
     this._rasterize();
   }
@@ -681,22 +682,99 @@ class PathNavigator {
   // layout is usable at all: if the bar dock or a table cannot be reached,
   // waiters cannot do their job and the run should not count as a cheap
   // layout -- it should not count at all.
+  // Labelt elke vrije cel met het nummer van zijn samenhangende component.
+  // Eenmalig per navigator; de layout verandert niet tijdens een run.
+  components() {
+    if (this._components) return this._components;
+    const label = new Map();
+    const sizes = [];
+    const free = (x, y) => this.inBounds(x, y) && !this.isBlocked(x, y);
+    for (let y = 0; y < this.rows; y++) {
+      for (let x = 0; x < this.cols; x++) {
+        if (!free(x, y) || label.has(this.key(x, y))) continue;
+        const id = sizes.length;
+        let n = 0;
+        const queue = [{ x, y }];
+        label.set(this.key(x, y), id);
+        while (queue.length) {
+          const c = queue.shift();
+          n++;
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              if (dx === 0 && dy === 0) continue;
+              const nx = c.x + dx, ny = c.y + dy;
+              if (!free(nx, ny)) continue;
+              // Zelfde hoekregel als findPath: niet diagonaal langs twee muren.
+              if (dx !== 0 && dy !== 0 && (!free(c.x + dx, c.y) || !free(c.x, c.y + dy))) continue;
+              const k = this.key(nx, ny);
+              if (label.has(k)) continue;
+              label.set(k, id);
+              queue.push({ x: nx, y: ny });
+            }
+          }
+        }
+        sizes.push(n);
+      }
+    }
+    this._components = { label, sizes };
+    return this._components;
+  }
+
+  // De componenten waarin een agent op `point` terecht kan komen. Staat hij op
+  // een vrije cel, dan is dat er precies een. Staat hij op meubilair -- dat kan,
+  // walkable() vrijwaart de startcel -- dan mag hij naar elke vrije buur
+  // stappen, maar daarna nooit meer terug: de cel is dan weer muur. Vandaar een
+  // verzameling en niet een enkel nummer.
+  entryComponents(point) {
+    const { label } = this.components();
+    const c = this.pointToCell(point);
+    const free = (x, y) => this.inBounds(x, y) && !this.isBlocked(x, y);
+    const out = new Set();
+    if (free(c.x, c.y)) {
+      out.add(label.get(this.key(c.x, c.y)));
+      return out;
+    }
+    const freeOrStart = (x, y) => free(x, y) || (x === c.x && y === c.y);
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        if (dx === 0 && dy === 0) continue;
+        const nx = c.x + dx, ny = c.y + dy;
+        if (!free(nx, ny)) continue;
+        if (dx !== 0 && dy !== 0 && (!freeOrStart(c.x + dx, c.y) || !freeOrStart(c.x, c.y + dy))) continue;
+        out.add(label.get(this.key(nx, ny)));
+      }
+    }
+    return out;
+  }
+
   reachableFrom(point) {
-    // Start bewust op de EXACTE cel, niet op nearestOpenPoint: die springt naar
-    // een vrije cel verderop en verklaart dan de hele zaal bereikbaar, terwijl
-    // de ober op de dock zelf ingemetseld kan staan. A* mag de startcel ook
-    // gebruiken, maar moet er wel uit kunnen stappen.
-    const startCell = this.pointToCell(point);
-    const seen = new Set([this.key(startCell.x, startCell.y)]);
-    const queue = [startCell];
+    // Samenhangende component van VRIJE cellen rond `point`.
+    //
+    // Geen enkele geblokkeerde cel doet mee, ook de startcel niet. Dat is
+    // bewust: findPath vrijwaart de startcel alleen voor de route die op dat
+    // moment loopt, dus zodra de agent weg is, is die cel weer muur. Zaaien
+    // vanaf een geblokkeerde cel -- of het nu de cel zelf is of al zijn vrije
+    // buren -- plakt gebieden aan elkaar die een agent nooit kan verbinden, en
+    // precies daar kroop de optimizer in: een ingemetselde bar heette dan
+    // "bereikbaar" omdat er aan weerszijden toevallig vrije ruimte lag.
+    //
+    // Een geblokkeerd startpunt is dus geen bereikbaar startpunt; de aanroeper
+    // beslist wat daarmee gebeurt (zie _checkLayoutReachability).
+    const start = this.pointToCell(point);
+    const free = (x, y) => this.inBounds(x, y) && !this.isBlocked(x, y);
+    const seen = new Set();
+    if (!free(start.x, start.y)) return seen;
+    const queue = [start];
+    seen.add(this.key(start.x, start.y));
     while (queue.length) {
       const c = queue.shift();
       for (let dy = -1; dy <= 1; dy++) {
         for (let dx = -1; dx <= 1; dx++) {
           if (dx === 0 && dy === 0) continue;
           const nx = c.x + dx, ny = c.y + dy;
-          if (!this.inBounds(nx, ny) || this.isBlocked(nx, ny)) continue;
-          if (dx !== 0 && dy !== 0 && (this.isBlocked(c.x + dx, c.y) || this.isBlocked(c.x, c.y + dy))) continue;
+          if (!free(nx, ny)) continue;
+          // Zelfde hoekregel als findPath: niet diagonaal langs twee muren.
+          if (dx !== 0 && dy !== 0 && (!free(c.x + dx, c.y) || !free(c.x, c.y + dy))) continue;
           const k = this.key(nx, ny);
           if (seen.has(k)) continue;
           seen.add(k);
@@ -1141,6 +1219,7 @@ class SimulationEngine {
     this.metrics = {
       totalServed: 0, totalLeft: 0, impatient: 0,
       waitSum: 0, waitSamples: 0, waiterDist: 0, score: 0,
+      waiterPathFailures: 0, guestPathFailures: 0,
     };
 
     // Bind the loop once so we keep a stable function identity for the
@@ -1191,6 +1270,7 @@ class SimulationEngine {
     this.metrics = {
       totalServed: 0, totalLeft: 0, impatient: 0,
       waitSum: 0, waitSamples: 0, waiterDist: 0, score: 0,
+      waiterPathFailures: 0, guestPathFailures: 0,
     };
     this.spawnQueue = [];               // pre-baked guest spawn schedule
 
@@ -1417,19 +1497,61 @@ class SimulationEngine {
   }
 
   _checkLayoutReachability() {
-    if (!this.navigator) return { valid: true, unreachable: 0 };
-    const reach = this.navigator.reachableFrom(this.bar.dock);
+    if (!this.navigator) {
+      return { valid: true, unreachable: 0, dockBoxedIn: false, trappedWaiters: 0, set: null };
+    }
+    const nav = this.navigator;
+    const { label, sizes } = nav.components();
+    const spawnCount = Math.max(1, (this.config && this.config.waiters) || this.waiters.length);
+    const spawn = i => ({ x: this.bar.dock.x, y: this.bar.dock.y + i * 22 });
+
+    // Alle obers moeten in EEN gezamenlijke loopvloer terechtkunnen. Een ober
+    // die in een nis van twee cellen staat legt nul afstand af, en dat maakt
+    // een layout kunstmatig goedkoop in plaats van ongeldig.
+    const entries = [];
+    for (let i = 0; i < spawnCount; i++) entries.push(nav.entryComponents(spawn(i)));
+    let common = [...(entries[0] || new Set())];
+    for (let i = 1; i < entries.length; i++) common = common.filter(id => entries[i].has(id));
+    // Bij meerdere gemeenschappelijke componenten wint de grootste; dat is de
+    // zaal, niet een toevallig gedeelde nis.
+    common.sort((a, b) => sizes[b] - sizes[a]);
+    const floor = common.length ? common[0] : null;
+    const trappedWaiters = floor === null
+      ? spawnCount
+      : entries.filter(e => !e.has(floor)).length;
+
+    const inFloor = p => {
+      if (floor === null) return false;
+      const c = nav.pointToCell(p);
+      return label.get(nav.key(c.x, c.y)) === floor;
+    };
+
+    // De bar zelf moet vanaf die vloer te belopen zijn. _routeAgent stuurt de
+    // ober naar nearestOpenPoint(dock, 5), dus toetsen we exact dat punt -- dat
+    // kan namelijk aan de verkeerde kant van een muur uitkomen.
+    const floorSize = floor === null ? 0 : sizes[floor];
+    // Twee vrije cellen rond de bar is geen zaal maar een kast.
+    const dockBoxedIn = floorSize < 10 || !inFloor(nav.nearestOpenPoint(this.bar.dock, 5));
+
+    // Toets exact het punt waar _servicePoint de ober heen stuurt (dus NA
+    // nearestOpenPoint). Op de rauwe kandidaat toetsen keurt iets anders dan de
+    // simulatie loopt: die kan geblokkeerd zijn (A* mag de doelcel wel in) of
+    // juist over een muur heen gesnapt worden.
     let unreachable = 0;
     for (const table of this.tables) {
-      const ok = this._servicePointCandidates(table).some(p => {
-        const c = this.navigator.pointToCell(p);
-        return reach.has(this.navigator.key(c.x, c.y));
-      });
+      const ok = this._servicePointCandidates(table)
+        .some(p => inFloor(nav.nearestOpenPoint(p, 3)));
       if (!ok) unreachable++;
     }
-    // Two free cells around the dock is not a room, it is a cupboard.
-    const dockBoxedIn = reach.size < 10;
-    return { valid: !dockBoxedIn && unreachable === 0, unreachable, dockBoxedIn };
+    return {
+      valid: !dockBoxedIn && unreachable === 0 && trappedWaiters === 0,
+      unreachable,
+      dockBoxedIn,
+      trappedWaiters,
+      floor,
+      floorSize,
+      inFloor,
+    };
   }
 
   // Compute an instantaneous "efficiency score" for the metrics panel.
@@ -1482,7 +1604,10 @@ class SimulationEngine {
         // ingesloten bar is geen goedkope layout maar een ongeldige.
         layoutValid:       this._layoutReach().valid,
         unreachableTables: this._layoutReach().unreachable,
+        trappedWaiters:    this._layoutReach().trappedWaiters,
         pathFailures:      this.navigator ? this.navigator.pathFailures : 0,
+        waiterPathFailures: this.metrics.waiterPathFailures || 0,
+        guestPathFailures:  this.metrics.guestPathFailures  || 0,
       },
       tables: this.tables.map(t => ({ size: t.size, x: t.x, y: t.y, rotation: t.rotation, isFixed: !!t.isFixed })),
       fixedTables: this.fixedTables.map(t => ({ size: t.size, x: t.x, y: t.y, rotation: t.rotation || 0 })),
@@ -1617,6 +1742,15 @@ class SimulationEngine {
     // cut through the furniture, so in that case the agent stays put.
     agent.target = agent.path.shift()
                 || (path.failed ? { x: agent.x, y: agent.y } : safeDestination);
+    // Onderscheid obers van gasten. Alleen oberroutes bepalen waiterDist, dus
+    // alleen die mislukkingen kunnen de doelfunctie kunstmatig verlagen; een
+    // gast die zijn stoel niet haalt is vervelend maar niet exploiteerbaar.
+    if (path.failed) this._countRouteFailure(agent);
+  }
+
+  _countRouteFailure(agent) {
+    if (agent instanceof Waiter) this.metrics.waiterPathFailures++;
+    else this.metrics.guestPathFailures++;
   }
 
   // Chair endpoints are the one exception to `nearestOpenPoint`: a chair
@@ -1633,6 +1767,7 @@ class SimulationEngine {
     guest.path = path.slice();
     guest.target = guest.path.shift()
                 || (path.failed ? { x: guest.x, y: guest.y } : seatPoint);
+    if (path.failed) this._countRouteFailure(guest);
   }
 
   // Waiters should not stand in the middle of a table. Pick a service
@@ -1640,8 +1775,18 @@ class SimulationEngine {
   // is closest to the waiter's current position and not blocked by another
   // furniture cell.
   _servicePoint(table, from) {
-    const open = this._servicePointCandidates(table)
-      .map(p => this.navigator ? this.navigator.nearestOpenPoint(p, 3) : p);
+    const nav = this.navigator;
+    let open = this._servicePointCandidates(table)
+      .map(p => nav ? nav.nearestOpenPoint(p, 3) : p);
+    // Kies bij voorkeur een aanlooppunt dat vanaf de bar ook echt te belopen
+    // is. Zonder dit filter wint altijd de dichtstbijzijnde kandidaat, ook als
+    // die achter een muur ligt -- dan faalt de route elke tick opnieuw en
+    // toetst _checkLayoutReachability iets anders dan de simulatie doet.
+    const inFloor = nav ? this._layoutReach().inFloor : null;
+    if (inFloor) {
+      const good = open.filter(inFloor);
+      if (good.length) open = good;
+    }
     open.sort((a, b) => dist(a, from) - dist(b, from));
     return open[0] || table.centre();
   }
@@ -2181,7 +2326,7 @@ class SimulationEngine {
     this.runIndex += 1;
     this.guests   = [];
     this.waiters  = [];
-    this.metrics  = { totalServed: 0, totalLeft: 0, impatient: 0, waitSum: 0, waitSamples: 0, waiterDist: 0, score: 0 };
+    this.metrics  = { totalServed: 0, totalLeft: 0, impatient: 0, waitSum: 0, waitSamples: 0, waiterDist: 0, score: 0, waiterPathFailures: 0, guestPathFailures: 0 };
     this.spawnQueue = [];
     this.entrance = { x: 48, y: config.roomH - 54 };
     this.exit     = this.entrance;
@@ -2225,7 +2370,7 @@ class SimulationEngine {
     this.runIndex += 1;
     this.guests   = [];
     this.waiters  = [];
-    this.metrics  = { totalServed: 0, totalLeft: 0, impatient: 0, waitSum: 0, waitSamples: 0, waiterDist: 0, score: 0 };
+    this.metrics  = { totalServed: 0, totalLeft: 0, impatient: 0, waitSum: 0, waitSamples: 0, waiterDist: 0, score: 0, waiterPathFailures: 0, guestPathFailures: 0 };
     this.spawnQueue = [];
     this.entrance = { x: 48, y: config.roomH - 54 };
     this.exit     = this.entrance;
@@ -2295,7 +2440,10 @@ class SimulationEngine {
         // ingesloten bar is geen goedkope layout maar een ongeldige.
         layoutValid:       this._layoutReach().valid,
         unreachableTables: this._layoutReach().unreachable,
+        trappedWaiters:    this._layoutReach().trappedWaiters,
         pathFailures:      this.navigator ? this.navigator.pathFailures : 0,
+        waiterPathFailures: this.metrics.waiterPathFailures || 0,
+        guestPathFailures:  this.metrics.guestPathFailures  || 0,
       },
       tables: this.tables.map(t => ({
         size: t.size, x: t.x, y: t.y, rotation: t.rotation, w: t.w, h: t.h, seats: t.seats,
@@ -2429,6 +2577,11 @@ class BatchRunner {
 (function () {
   const $ = (id) => document.getElementById(id);
   const engine = new SimulationEngine($("stage"));
+  // Haak voor headless gereedschap (validate_headless.js, collect_*.py).
+  // Zonder deze regel moet zo'n script de engine uit een klik-handler
+  // vissen; dat werkte, maar was breekbaar en stil bij falen.
+  window.__engine = engine;
+  window.__BatchRunner = BatchRunner;
 
   // Live label updates for the two range sliders.
   $("guests").addEventListener("input", (e) => $("guestsVal").textContent = e.target.value);
