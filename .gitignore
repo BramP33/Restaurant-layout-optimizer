@@ -38,3 +38,10 @@ best-new-validate.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Interne AI/tool-config
+.mcp.json
+
+# Out-of-fold voorspellingen (regenereer met ml/train_surrogate.py)
+surrogate-oof.json
+ml/surrogate-oof.json

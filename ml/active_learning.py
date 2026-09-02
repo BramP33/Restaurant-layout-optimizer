@@ -18,6 +18,7 @@ import subprocess
 from pathlib import Path
 
 HERE = Path(__file__).parent
+ROOT = HERE.parent          # data en modelbestanden staan in de repo-root
 
 
 def load_json(path):
@@ -41,7 +42,7 @@ def main():
         else:
             i += 1
 
-    merged_path = HERE / "restaurant-sim-merged.json"
+    merged_path = ROOT / "restaurant-sim-merged.json"
 
     if validated_path and validated_path.exists():
         print(f"Stap 1 — gevalideerde resultaten toevoegen: {validated_path}")

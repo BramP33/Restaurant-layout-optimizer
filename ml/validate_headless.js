@@ -23,9 +23,10 @@ const INPUT   = _inputIdx >= 0 ? args[_inputIdx + 1] : null;
 const _outIdx = args.indexOf('--out');
 const OUT     = _outIdx >= 0 ? args[_outIdx + 1] : null;
 const HERE    = __dirname;
+const ROOT    = path.join(HERE, '..');   // data-artefacten staan in de repo-root
 const SIM_URL = `file://${path.join(HERE, '..', 'simulatie.html')}`;
-const OPT_IN  = INPUT ? path.resolve(INPUT) : path.join(HERE, 'optimizer-results.json');
-const VAL_OUT = OUT ? path.resolve(OUT) : path.join(HERE, 'validation-results.json');
+const OPT_IN  = INPUT ? path.resolve(INPUT) : path.join(ROOT, 'optimizer-results.json');
+const VAL_OUT = OUT ? path.resolve(OUT) : path.join(ROOT, 'validation-results.json');
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }

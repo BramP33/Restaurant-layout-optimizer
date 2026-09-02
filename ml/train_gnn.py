@@ -20,6 +20,7 @@ from pathlib import Path
 import numpy as np
 
 HERE = Path(__file__).parent
+ROOT = HERE.parent          # data en modelbestanden staan in de repo-root
 
 
 # ── Argumenten ────────────────────────────────────────────────────────────────
@@ -43,10 +44,10 @@ def parse_args():
 # ── Dataset laden ─────────────────────────────────────────────────────────────
 
 def _find_data():
-    merged = HERE / "restaurant-sim-merged.json"
+    merged = ROOT / "restaurant-sim-merged.json"
     if merged.exists():
         return merged
-    files = sorted(HERE.glob("restaurant-sim-batch-*.json"))
+    files = sorted(ROOT.glob("restaurant-sim-batch-*.json"))
     if files:
         return files[-1]
     raise FileNotFoundError("Geen dataset gevonden (restaurant-sim-merged.json).")
@@ -299,7 +300,7 @@ def main():
     best_val_mae = 1e9
     best_state   = None
     patience_cnt = 0
-    out_path     = Path(args.out) if args.out else HERE / "gnn_model.pt"
+    out_path     = Path(args.out) if args.out else ROOT / "gnn_model.pt"
 
     print(f"\nTraining {args.epochs} epochs (patience={args.patience}) …\n")
     header = f"{'Epoch':>6}  {'Train-loss':>12}  {'Val-MAE':>12}  {'Val-R²':>8}  {'LR':>10}  {'Time':>6}"

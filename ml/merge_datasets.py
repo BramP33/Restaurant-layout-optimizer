@@ -13,6 +13,7 @@ import glob
 from pathlib import Path
 
 HERE = Path(__file__).parent
+ROOT = HERE.parent          # data en modelbestanden staan in de repo-root
 
 
 def load(path):
@@ -22,7 +23,7 @@ def load(path):
 
 def main():
     args = sys.argv[1:]
-    out_file = HERE / "restaurant-sim-merged.json"
+    out_file = ROOT / "restaurant-sim-merged.json"
 
     # --out overschrijft de uitvoernaam
     if "--out" in args:
@@ -34,7 +35,7 @@ def main():
     if args:
         files = [Path(a) for a in args]
     else:
-        files = sorted(HERE.glob("restaurant-sim-batch-*.json"))
+        files = sorted(ROOT.glob("restaurant-sim-batch-*.json"))
 
     if not files:
         print("Geen bestanden gevonden. Geef bestanden mee of zet ze in dezelfde map.")

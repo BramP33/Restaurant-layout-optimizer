@@ -18,6 +18,7 @@ import joblib
 from pathlib import Path
 
 HERE = Path(__file__).parent
+ROOT = HERE.parent          # data en modelbestanden staan in de repo-root
 
 # ── Constanten (zelfde als simulator) ────────────────────────────────────────
 ROOM_W = 640
@@ -338,14 +339,14 @@ if __name__ == "__main__":
     rng = np.random.default_rng(42)
 
     # ── RF laden voor hoofdoptimalisatie ──
-    saved    = joblib.load(HERE / "surrogate_model.pkl")
+    saved    = joblib.load(ROOT / "surrogate_model.pkl")
     model    = saved["model"]
     feat_len = len(saved["feature_names"])
     print(f"Model: {saved['model_name']} — {feat_len} features — target={saved['target']}")
 
     # ── GNN laden voor gradiëntoptimalisatie (optioneel) ──
     gnn_model = None
-    gnn_path  = HERE / "gnn_model.pt"
+    gnn_path  = ROOT / "gnn_model.pt"
     if gnn_path.exists():
         try:
             from gnn_layout import GNNSurrogate
@@ -372,4 +373,4 @@ if __name__ == "__main__":
                                           top_k=min(5, len(layouts)),
                                           steps=150)
 
-    export(layouts, scores, HERE / "optimizer-results.json", top_n=cfg["top"])
+    export(layouts, scores, ROOT / "optimizer-results.json", top_n=cfg["top"])

@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).parent
+ROOT = HERE.parent          # data en modelbestanden staan in de repo-root
 
 
 def parse_args():
@@ -125,7 +126,7 @@ def main():
 
     batch_file  = HERE / "_batch_layouts.json"
     val_file    = HERE / "_batch_validated.json"
-    merged_path = HERE / "restaurant-sim-merged.json"
+    merged_path = ROOT / "restaurant-sim-merged.json"
 
     deadline    = time.time() + args.hours * 3600
     total_added = 0
