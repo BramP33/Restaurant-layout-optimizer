@@ -45,3 +45,7 @@ Thumbs.db
 # Out-of-fold voorspellingen (regenereer met ml/train_surrogate.py)
 surrogate-oof.json
 ml/surrogate-oof.json
+
+# Verzamelde shards (regenereer met ml/collect_parallel.py)
+data/shards/
+restaurant-sim-clean.json

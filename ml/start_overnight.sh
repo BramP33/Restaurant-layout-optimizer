@@ -1,12 +1,15 @@
-#!/bin/bash
-cd "/home/bram/Restaurant Simulator/ml"
-# Gebruik python3.12 (heeft numpy/torch) i.p.v. conda's python3
-PYTHON=python3.12
-echo "=== Overnight data collector ==="
-echo "Verwacht ~19.000 nieuwe runs in 8 uur"
-echo "Druk Ctrl+C om te stoppen"
-echo ""
-$PYTHON collect_overnight.py --batch 150 --seeds 3 --hours 8
-echo ""
-echo "=== Klaar! Hertraining starten ==="
-$PYTHON train_gnn.py --epochs 1000 --patience 100 --lr 5e-4 --hidden 64
+#!/usr/bin/env bash
+# Nachtelijke dataverzameling. Werkt vanuit elke map en gebruikt de venv van
+# deze repo, zodat hetzelfde script lokaal en op een VM draait.
+set -euo pipefail
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PYTHON="$REPO_DIR/.venv/bin/python"
+WORKERS="${1:-$(( $(nproc) / 2 ))}"
+HOURS="${2:-8}"
+
+echo "=== Dataverzameling: $WORKERS werkers, $HOURS uur ==="
+cd "$REPO_DIR/ml"
+"$PYTHON" collect_parallel.py --workers "$WORKERS" --hours "$HOURS"
+echo
+echo "=== Shards samenvoegen ==="
+"$PYTHON" merge_shards.py

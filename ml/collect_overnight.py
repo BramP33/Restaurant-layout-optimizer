@@ -106,7 +106,7 @@ def retrain_gnn():
     print("  ↻ Hertrainen GNN…")
     t0 = time.time()
     result = subprocess.run(
-        ["python3.12", str(HERE / "train_gnn.py"),
+        [sys.executable, str(HERE / "train_gnn.py"),
          "--epochs", "600", "--patience", "60", "--lr", "5e-4"],
         cwd=HERE, capture_output=True, text=True,
     )
