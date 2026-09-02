@@ -62,8 +62,14 @@ async function runValidation(page, layout, nSeeds) {
           const scores   = results.map(r => r.metrics.score);
           const dists    = results.map(r => r.metrics.waiterDist);
           const waits    = results.map(r => r.metrics.avgWait);
-          const served   = results.map(r => r.metrics.servedDrinks);
-          const impatient= results.map(r => r.metrics.impatientGuests);
+          // De export heet totalServed/impatient; servedDrinks en
+          // impatientGuests bestaan niet, waardoor deze kolommen altijd
+          // null waren in validation-results.json.
+          const served   = results.map(r => r.metrics.totalServed);
+          const impatient= results.map(r => r.metrics.impatient);
+          const valid    = results.map(r => r.metrics.layoutValid);
+          const unreach  = results.map(r => r.metrics.unreachableTables);
+          const failures = results.map(r => r.metrics.pathFailures);
           const avg      = arr => arr.reduce((a, b) => a + b, 0) / arr.length;
           // Bouw trainingsdata-entries per seed (zelfde formaat als batch export)
           const trainingRuns = results.map(r => ({
@@ -85,6 +91,14 @@ async function runValidation(page, layout, nSeeds) {
             wait_per_seed:  waits,
             served_per_seed:served,
             impatient_per_seed: impatient,
+            // Een layout waarin de bar of een tafel onbereikbaar is levert
+            // een bedrieglijk lage loopafstand op; deze vlaggen maken dat
+            // zichtbaar zodat de pipeline zulke runs kan uitsluiten.
+            // BatchRunner middelt metrics numeriek, dus false komt hier
+            // aan als 0 -- vergelijken met === false zou altijd waar zijn.
+            layout_valid:       valid.every(v => Boolean(v)),
+            unreachable_tables: Math.max(0, ...unreach.map(u => u || 0)),
+            path_failures:      Math.max(0, ...failures.map(f => f || 0)),
             tables:         layout.tables,
             config:         cfg,
             trainingRuns,

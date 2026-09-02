@@ -599,6 +599,7 @@ class PathNavigator {
     this.rows = Math.ceil(height / this.cell);
     this.blocked = new Set();
     this.obstacles = [];
+    this.pathFailures = 0;              // routes die onmogelijk bleken
     this._buildObstacles(tables, bar, userObstacles);
     this._rasterize();
   }
@@ -676,6 +677,36 @@ class PathNavigator {
     return point;
   }
 
+  // Flood fill over the free cells from `point`. Used to decide whether a
+  // layout is usable at all: if the bar dock or a table cannot be reached,
+  // waiters cannot do their job and the run should not count as a cheap
+  // layout -- it should not count at all.
+  reachableFrom(point) {
+    // Start bewust op de EXACTE cel, niet op nearestOpenPoint: die springt naar
+    // een vrije cel verderop en verklaart dan de hele zaal bereikbaar, terwijl
+    // de ober op de dock zelf ingemetseld kan staan. A* mag de startcel ook
+    // gebruiken, maar moet er wel uit kunnen stappen.
+    const startCell = this.pointToCell(point);
+    const seen = new Set([this.key(startCell.x, startCell.y)]);
+    const queue = [startCell];
+    while (queue.length) {
+      const c = queue.shift();
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue;
+          const nx = c.x + dx, ny = c.y + dy;
+          if (!this.inBounds(nx, ny) || this.isBlocked(nx, ny)) continue;
+          if (dx !== 0 && dy !== 0 && (this.isBlocked(c.x + dx, c.y) || this.isBlocked(c.x, c.y + dy))) continue;
+          const k = this.key(nx, ny);
+          if (seen.has(k)) continue;
+          seen.add(k);
+          queue.push({ x: nx, y: ny });
+        }
+      }
+    }
+    return seen;
+  }
+
   // A* search with 8-way movement. Diagonal steps are disallowed when they
   // would cut through the corner of two blocked orthogonal cells, which is
   // the usual reason sprites appear to squeeze through furniture corners.
@@ -690,6 +721,11 @@ class PathNavigator {
     open.set(startKey, start);
     gScore.set(startKey, 0);
     fScore.set(startKey, Math.hypot(goal.x - start.x, goal.y - start.y));
+    // Track the reachable cell that got closest to the goal, so a failed
+    // search can still return a legitimate partial route instead of a
+    // straight line through the furniture.
+    let bestKey = startKey, bestCell = start;
+    let bestH = Math.hypot(goal.x - start.x, goal.y - start.y);
 
     while (open.size) {
       let currentKey = null, current = null, best = Infinity;
@@ -701,6 +737,8 @@ class PathNavigator {
         return this._reconstruct(came, currentKey, to);
       }
       open.delete(currentKey);
+      const h = Math.hypot(goal.x - current.x, goal.y - current.y);
+      if (h < bestH) { bestH = h; bestKey = currentKey; bestCell = current; }
       for (let dy = -1; dy <= 1; dy++) {
         for (let dx = -1; dx <= 1; dx++) {
           if (dx === 0 && dy === 0) continue;
@@ -722,7 +760,21 @@ class PathNavigator {
         }
       }
     }
-    return [to]; // graceful fallback for very dense layouts
+    // No route exists. Walking straight to `to` would let the agent clip
+    // through tables and chairs, and a shorter straight line scores BETTER
+    // on waiter distance -- so the optimizer learned to wall the bar in on
+    // purpose. Instead we return the furthest legitimately reachable point
+    // and record the failure, so an unusable layout is visibly unusable
+    // rather than silently cheap.
+    // A successful search can also return an empty array (a very short hop
+    // collapses to nothing in _reconstruct), so failure is flagged
+    // explicitly rather than inferred from the length.
+    this.pathFailures++;
+    const partial = bestKey !== startKey
+      ? this._reconstruct(came, bestKey, this.cellToPoint(bestCell.x, bestCell.y))
+      : [];
+    partial.failed = true;
+    return partial;
   }
 
   // Collapse the grid-cell chain into waypoints, keeping only turns. This
@@ -1172,6 +1224,7 @@ class SimulationEngine {
     // grid. Both guests and waiters use this same map, which keeps their
     // movement constraints consistent.
     this.navigator = new PathNavigator(config.roomW, config.roomH, this.tables, this.bar, this.obstacles);
+    this._layoutReachCache = null;   // nieuwe layout -> bereikbaarheid opnieuw bepalen
 
     // Spawn waiters at the bar dock with distinct colours.
     for (let i = 0; i < config.waiters; i++) {
@@ -1352,6 +1405,33 @@ class SimulationEngine {
     return placed;
   }
 
+  // A layout is only usable when a waiter can actually walk from the bar
+  // dock to every table. Without this check a layout that walls the dock in
+  // scores as if it were extremely efficient -- waiters that cannot move do
+  // not accumulate any distance at all. Such a run is invalid, not cheap.
+  // Gecachet: de flood fill is goedkoop maar niet gratis, en de layout
+  // verandert niet tijdens een run.
+  _layoutReach() {
+    if (!this._layoutReachCache) this._layoutReachCache = this._checkLayoutReachability();
+    return this._layoutReachCache;
+  }
+
+  _checkLayoutReachability() {
+    if (!this.navigator) return { valid: true, unreachable: 0 };
+    const reach = this.navigator.reachableFrom(this.bar.dock);
+    let unreachable = 0;
+    for (const table of this.tables) {
+      const ok = this._servicePointCandidates(table).some(p => {
+        const c = this.navigator.pointToCell(p);
+        return reach.has(this.navigator.key(c.x, c.y));
+      });
+      if (!ok) unreachable++;
+    }
+    // Two free cells around the dock is not a room, it is a cupboard.
+    const dockBoxedIn = reach.size < 10;
+    return { valid: !dockBoxedIn && unreachable === 0, unreachable, dockBoxedIn };
+  }
+
   // Compute an instantaneous "efficiency score" for the metrics panel.
   // Higher is better: rewards served drinks and seated guests, penalizes
   // accumulated wait time, impatient guests, and total waiter distance.
@@ -1398,6 +1478,11 @@ class SimulationEngine {
         impatient: this.metrics.impatient,
         avgWait: this.metrics.waitSamples ? this.metrics.waitSum / this.metrics.waitSamples : 0,
         waiterDist: this.metrics.waiterDist,
+        // Bereikbaarheid: een run met een onbereikbare tafel of een
+        // ingesloten bar is geen goedkope layout maar een ongeldige.
+        layoutValid:       this._layoutReach().valid,
+        unreachableTables: this._layoutReach().unreachable,
+        pathFailures:      this.navigator ? this.navigator.pathFailures : 0,
       },
       tables: this.tables.map(t => ({ size: t.size, x: t.x, y: t.y, rotation: t.rotation, isFixed: !!t.isFixed })),
       fixedTables: this.fixedTables.map(t => ({ size: t.size, x: t.x, y: t.y, rotation: t.rotation || 0 })),
@@ -1526,7 +1611,12 @@ class SimulationEngine {
     const safeDestination = this.navigator.nearestOpenPoint(destination, 5);
     const path = this.navigator.findPath({ x: agent.x, y: agent.y }, safeDestination);
     agent.path = path.slice();
-    agent.target = agent.path.shift() || safeDestination;
+    // A successful short hop collapses to an empty waypoint list, and then
+    // heading straight for the destination is correct -- there is nothing in
+    // between. Only when the search actually failed would that straight line
+    // cut through the furniture, so in that case the agent stays put.
+    agent.target = agent.path.shift()
+                || (path.failed ? { x: agent.x, y: agent.y } : safeDestination);
   }
 
   // Chair endpoints are the one exception to `nearestOpenPoint`: a chair
@@ -1541,7 +1631,8 @@ class SimulationEngine {
     }
     const path = this.navigator.findPath({ x: guest.x, y: guest.y }, seatPoint);
     guest.path = path.slice();
-    guest.target = guest.path.shift() || seatPoint;
+    guest.target = guest.path.shift()
+                || (path.failed ? { x: guest.x, y: guest.y } : seatPoint);
   }
 
   // Waiters should not stand in the middle of a table. Pick a service
@@ -1549,6 +1640,14 @@ class SimulationEngine {
   // is closest to the waiter's current position and not blocked by another
   // furniture cell.
   _servicePoint(table, from) {
+    const open = this._servicePointCandidates(table)
+      .map(p => this.navigator ? this.navigator.nearestOpenPoint(p, 3) : p);
+    open.sort((a, b) => dist(a, from) - dist(b, from));
+    return open[0] || table.centre();
+  }
+
+  // The eight approach points around a table, clamped inside the room.
+  _servicePointCandidates(table) {
     const c = table.centre();
     const gap = 26;
     const candidates = [
@@ -1564,9 +1663,7 @@ class SimulationEngine {
       x: clamp(p.x, 16, this.canvas.width - 16),
       y: clamp(p.y, 16, this.canvas.height - 16),
     }));
-    const open = candidates.map(p => this.navigator ? this.navigator.nearestOpenPoint(p, 3) : p);
-    open.sort((a, b) => dist(a, from) - dist(b, from));
-    return open[0] || c;
+    return candidates;
   }
 
   // Compute time until next drink order. Accounts for first hour vs rest.
@@ -2099,6 +2196,7 @@ class SimulationEngine {
     }
     if (this.layoutError) return false;
     this.navigator = new PathNavigator(config.roomW, config.roomH, this.tables, this.bar, this.obstacles);
+    this._layoutReachCache = null;   // nieuwe layout -> bereikbaarheid opnieuw bepalen
     for (let i = 0; i < config.waiters; i++) {
       this.waiters.push(new Waiter(i,
         { x: this.bar.dock.x, y: this.bar.dock.y + i * 22 },
@@ -2145,6 +2243,7 @@ class SimulationEngine {
     }
     this.tables = tables;
     this.navigator = new PathNavigator(config.roomW, config.roomH, this.tables, this.bar, this.obstacles);
+    this._layoutReachCache = null;   // nieuwe layout -> bereikbaarheid opnieuw bepalen
     for (let i = 0; i < config.waiters; i++) {
       this.waiters.push(new Waiter(i,
         { x: this.bar.dock.x, y: this.bar.dock.y + i * 22 },
@@ -2192,6 +2291,11 @@ class SimulationEngine {
         impatient:   this.metrics.impatient,
         avgWait:     this.metrics.waitSamples ? this.metrics.waitSum / this.metrics.waitSamples : 0,
         waiterDist:  this.metrics.waiterDist,
+        // Bereikbaarheid: een run met een onbereikbare tafel of een
+        // ingesloten bar is geen goedkope layout maar een ongeldige.
+        layoutValid:       this._layoutReach().valid,
+        unreachableTables: this._layoutReach().unreachable,
+        pathFailures:      this.navigator ? this.navigator.pathFailures : 0,
       },
       tables: this.tables.map(t => ({
         size: t.size, x: t.x, y: t.y, rotation: t.rotation, w: t.w, h: t.h, seats: t.seats,
@@ -2675,6 +2779,7 @@ class BatchRunner {
     engine.spawnQueue = [];
     engine.tables = engine.generateLayout();
     engine.navigator = new PathNavigator(engine.config.roomW, engine.config.roomH, engine.tables, engine.bar, engine.obstacles);
+    engine._layoutReachCache = null;
   }
 
   // Commit the pending drawn table (with chairs) to drawnTables.
