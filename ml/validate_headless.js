@@ -23,9 +23,10 @@ const INPUT   = _inputIdx >= 0 ? args[_inputIdx + 1] : null;
 const _outIdx = args.indexOf('--out');
 const OUT     = _outIdx >= 0 ? args[_outIdx + 1] : null;
 const HERE    = __dirname;
+const ROOT    = path.join(HERE, '..');   // data-artefacten staan in de repo-root
 const SIM_URL = `file://${path.join(HERE, '..', 'simulatie.html')}`;
-const OPT_IN  = INPUT ? path.resolve(INPUT) : path.join(HERE, 'optimizer-results.json');
-const VAL_OUT = OUT ? path.resolve(OUT) : path.join(HERE, 'validation-results.json');
+const OPT_IN  = INPUT ? path.resolve(INPUT) : path.join(ROOT, 'optimizer-results.json');
+const VAL_OUT = OUT ? path.resolve(OUT) : path.join(ROOT, 'validation-results.json');
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -61,8 +62,14 @@ async function runValidation(page, layout, nSeeds) {
           const scores   = results.map(r => r.metrics.score);
           const dists    = results.map(r => r.metrics.waiterDist);
           const waits    = results.map(r => r.metrics.avgWait);
-          const served   = results.map(r => r.metrics.servedDrinks);
-          const impatient= results.map(r => r.metrics.impatientGuests);
+          // De export heet totalServed/impatient; servedDrinks en
+          // impatientGuests bestaan niet, waardoor deze kolommen altijd
+          // null waren in validation-results.json.
+          const served   = results.map(r => r.metrics.totalServed);
+          const impatient= results.map(r => r.metrics.impatient);
+          const valid    = results.map(r => r.metrics.layoutValid);
+          const unreach  = results.map(r => r.metrics.unreachableTables);
+          const failures = results.map(r => r.metrics.pathFailures);
           const avg      = arr => arr.reduce((a, b) => a + b, 0) / arr.length;
           // Bouw trainingsdata-entries per seed (zelfde formaat als batch export)
           const trainingRuns = results.map(r => ({
@@ -84,6 +91,14 @@ async function runValidation(page, layout, nSeeds) {
             wait_per_seed:  waits,
             served_per_seed:served,
             impatient_per_seed: impatient,
+            // Een layout waarin de bar of een tafel onbereikbaar is levert
+            // een bedrieglijk lage loopafstand op; deze vlaggen maken dat
+            // zichtbaar zodat de pipeline zulke runs kan uitsluiten.
+            // BatchRunner middelt metrics numeriek, dus false komt hier
+            // aan als 0 -- vergelijken met === false zou altijd waar zijn.
+            layout_valid:       valid.every(v => Boolean(v)),
+            unreachable_tables: Math.max(0, ...unreach.map(u => u || 0)),
+            path_failures:      Math.max(0, ...failures.map(f => f || 0)),
             tables:         layout.tables,
             config:         cfg,
             trainingRuns,

@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).parent
+ROOT = HERE.parent          # data en modelbestanden staan in de repo-root
 
 
 def parse_args():
@@ -105,7 +106,7 @@ def retrain_gnn():
     print("  ↻ Hertrainen GNN…")
     t0 = time.time()
     result = subprocess.run(
-        ["python3.12", str(HERE / "train_gnn.py"),
+        [sys.executable, str(HERE / "train_gnn.py"),
          "--epochs", "600", "--patience", "60", "--lr", "5e-4"],
         cwd=HERE, capture_output=True, text=True,
     )
@@ -125,7 +126,7 @@ def main():
 
     batch_file  = HERE / "_batch_layouts.json"
     val_file    = HERE / "_batch_validated.json"
-    merged_path = HERE / "restaurant-sim-merged.json"
+    merged_path = ROOT / "restaurant-sim-merged.json"
 
     deadline    = time.time() + args.hours * 3600
     total_added = 0

@@ -12,7 +12,7 @@ The simulator runs a full restaurant floor in the browser: guests arrive, get se
 
 The ML pipeline collects thousands of these simulation runs, trains a surrogate model on the layout data, and uses that model to search for better table arrangements — without running the expensive full simulation for every candidate.
 
-**Result: 31% reduction in waiter travel distance** (367k → 252k pixels), found through surrogate-guided optimization and confirmed via headless browser validation.
+**Result: 31% reduction in waiter travel distance** (367k → 253k pixels), found through surrogate-guided optimization and confirmed via headless browser validation.
 
 ---
 
@@ -54,10 +54,10 @@ score = (servedDrinks × 12) − (avgWait × 3) − (impatientGuests × 25) − 
 Browser sim (batch export)
         │
         ▼
-merge_datasets.py ──► restaurant-sim-merged.json (2,045 layouts)
+merge_datasets.py ──► restaurant-sim-merged.json (10,715 runs)
         │
         ▼
-train_surrogate.py  ──► surrogate_model.pkl  (RandomForest, R²=0.623)
+train_surrogate.py  ──► surrogate_model.pkl  (XGBoost, R²=0.678)
 train_gnn.py        ──► gnn_model.pt         (GATv2, R²≈0.35–0.40)
         │
         ▼
@@ -68,14 +68,35 @@ validate_headless.js ──► validation-results.json  (real scores via Playwri
         │
         ▼
 active_learning.py ──► merge + retrain + re-optimize (loop)
+
+evaluate.py        ──► reports the four headline metrics at any point
 ```
 
 ### Surrogate Model
 
-- **Algorithm**: RandomForest (best of RF / XGBoost / GradientBoosting comparison)
+- **Algorithm**: XGBoost (best of RF / XGBoost / GradientBoosting comparison)
 - **Features**: 71 hand-crafted features — raw table positions, per-table distances to bar, corridor width estimates, cluster compactness
-- **Target**: `waiterDist` (total waiter travel distance per run, averaged over multiple seeds)
-- **Performance**: R² = 0.623, MAE = 85,608 px on held-out data
+- **Target**: `log(waiterDist)`, back-transformed to pixels on predict. Waiter distance spans 253k–1.3M px, so log space keeps the errors evenly weighted across that range
+- **Deduplication**: the 10,715 raw runs collapse to 4,272 unique layouts. `validate_headless.js` writes one record *per seed*, each carrying the batch's full seed list, so the same layout legitimately appears many times. Merging them into one row with a per-simulation weight is what keeps identical layouts out of train and test at the same time
+- **Validation**: `GroupKFold` on the layout key. After deduplication every group holds exactly one row, so this is a safety net rather than a fix — the deduplication is what removes the leak
+- **Performance**: R² = 0.678, MAE = 60,787 px out-of-fold on 4,272 unique layouts
+
+### Why R² is not the headline metric
+
+Global R² is dominated by the gap between disastrous and mediocre layouts, which is not what the optimizer needs. What matters is ranking *good* layouts against each other. `evaluate.py` reports four numbers instead:
+
+| Metric | Meaning | Current |
+|---|---|---|
+| Validated top-1 | Best layout after real headless validation | 254,012 px (n=1) |
+| Calibration error | Mean (predicted − actual) on validated candidates | −0.1% (n=1) |
+| Spearman ρ, best decile | Ranking quality among the top 10% of layouts | 0.328 |
+| R² out-of-fold | Deduplicated, weighted per simulation, GroupKFold | 0.678 |
+
+The gap between ρ = 0.85 overall and ρ = 0.33 within the best decile is the single most useful diagnostic in the pipeline: the model separates bad from good easily, but barely ranks the good ones. Simulator noise is not the limit — measured against the per-seed spread in the dataset, the ceiling sits near R² ≈ 0.99.
+
+A second systematic effect matters more than the log transform: prediction bias runs from **+10% in the best decile to −21% in the worst**, plain regression to the mean. That is what makes the surrogate unreliable exactly where the optimizer searches.
+
+The first two metrics currently rest on a single validated layout, so treat them as placeholders until a proper validation round lands.
 
 ### GNN Model
 
@@ -95,7 +116,7 @@ Candidate layouts from the optimizer are validated by actually running the simul
 
 | Metric | Baseline (greedy) | Optimized |
 |---|---|---|
-| Waiter travel distance | ~367,532 px | ~252,102 px |
+| Waiter travel distance | ~367,532 px | ~253,102 px |
 | Improvement | — | **31.4%** |
 | Efficiency score | ~−3,800 | ~−3,007 |
 
@@ -117,9 +138,14 @@ xdg-open simulatie.html     # Linux
 
 **Prerequisites:**
 ```bash
-pip install numpy scikit-learn xgboost joblib torch torch-geometric
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 cd ml && npm install   # installs Playwright for headless validation
 ```
+
+PyTorch is only needed for the GNN (`train_gnn.py`, `gnn_layout.py`) and is deliberately left out of `requirements.txt` — see the comment there for the install command.
+
+Data files (`restaurant-sim-*.json`, `surrogate_model.pkl`, `gnn_model.pt`, results JSON) live in the **repository root**; the scripts live in `ml/` and resolve paths relative to it.
 
 **Full active learning cycle:**
 
@@ -127,13 +153,14 @@ cd ml && npm install   # installs Playwright for headless validation
 cd ml
 
 # 1. Export training data from the browser (use the "Export batch" button),
-#    place the downloaded JSON files in ml/
+#    place the downloaded JSON files in the repository root
 
 # 2. Merge batch files
 python3 merge_datasets.py
 
 # 3. Train surrogate model
-python3 train_surrogate.py       # RandomForest baseline
+python3 train_surrogate.py       # XGBoost/RF/GBT comparison, saves the best
+python3 evaluate.py              # report the four headline metrics
 python3 train_gnn.py             # GATv2 GNN (requires PyTorch + PyG)
 
 # 4. Generate optimized layouts
@@ -157,10 +184,13 @@ bash ml/start_overnight.sh
 
 ```
 simulatie.html              # Full browser simulator (single file, no build step)
-best-layout.json            # Best layout found (252k px, confirmed)
+best-layout.json            # Best layout found (253k px, confirmed)
+requirements.txt            # Python dependencies for the core pipeline
 ml/
 ├── optimize_layout.py      # Surrogate-guided layout search (500k candidates)
 ├── train_surrogate.py      # RF/XGBoost/GBT comparison, saves best model
+├── log_target.py           # Log-space wrapper around the regressor
+├── evaluate.py             # Reports the four headline metrics
 ├── train_gnn.py            # GATv2 GNN trainer (GPU-accelerated)
 ├── gnn_layout.py           # GNN architecture + graph builder + gradient optimizer
 ├── validate_headless.js    # Playwright headless validator

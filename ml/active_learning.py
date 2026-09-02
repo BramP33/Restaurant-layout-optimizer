@@ -18,6 +18,7 @@ import subprocess
 from pathlib import Path
 
 HERE = Path(__file__).parent
+ROOT = HERE.parent          # data en modelbestanden staan in de repo-root
 
 
 def load_json(path):
@@ -41,7 +42,7 @@ def main():
         else:
             i += 1
 
-    merged_path = HERE / "restaurant-sim-merged.json"
+    merged_path = ROOT / "restaurant-sim-merged.json"
 
     if validated_path and validated_path.exists():
         print(f"Stap 1 — gevalideerde resultaten toevoegen: {validated_path}")
@@ -76,13 +77,13 @@ def main():
     except ImportError:
         train_script = HERE / "train_surrogate.py"
     result = subprocess.run(
-        ["python3", str(train_script)],
+        [sys.executable, str(train_script)],
         cwd=HERE, capture_output=False
     )
     if result.returncode != 0:
         print("GNN trainingsfout, fallback naar RF…")
         result = subprocess.run(
-            ["python3", str(HERE / "train_surrogate.py")],
+            [sys.executable, str(HERE / "train_surrogate.py")],
             cwd=HERE, capture_output=False
         )
         if result.returncode != 0:
@@ -91,7 +92,7 @@ def main():
 
     print("\nStap 3 — optimizer draaien…")
     subprocess.run(
-        ["python3", str(HERE / "optimize_layout.py"), "--candidates", "500000"],
+        [sys.executable, str(HERE / "optimize_layout.py"), "--candidates", "500000"],
         cwd=HERE, capture_output=False
     )
 
