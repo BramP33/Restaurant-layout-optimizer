@@ -5,8 +5,9 @@ Verbeterde versie met:
 - Rijkere feature set (per-tafel barstand, gesorteerde afstanden, compactheid)
 - XGBoost + GradientBoosting + RandomForest vergelijking
 - Dedupe op layout: identieke indelingen worden samengevoegd tot een rij met
-  een seed-gewogen target, zodat ze niet in train en test tegelijk belanden
-- GroupKFold op layout-sleutel als expliciete garantie tegen datalek
+  een target dat per simulatie gewogen is, zodat ze niet in train en test
+  tegelijk belanden
+- GroupKFold op layout-sleutel als vangnet; de dedupe is wat het lek wegneemt
 - Log-ruimte target (waiterDist loopt van ~253k tot ~1,3M px)
 - Rapporteert Spearman binnen het beste deciel naast R², en schrijft de
   out-of-fold voorspellingen weg voor evaluate.py

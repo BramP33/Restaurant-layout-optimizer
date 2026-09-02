@@ -57,7 +57,7 @@ Browser sim (batch export)
 merge_datasets.py ──► restaurant-sim-merged.json (10,715 runs)
         │
         ▼
-train_surrogate.py  ──► surrogate_model.pkl  (XGBoost, R²=0.663)
+train_surrogate.py  ──► surrogate_model.pkl  (XGBoost, R²=0.678)
 train_gnn.py        ──► gnn_model.pt         (GATv2, R²≈0.35–0.40)
         │
         ▼
@@ -184,7 +184,7 @@ bash ml/start_overnight.sh
 
 ```
 simulatie.html              # Full browser simulator (single file, no build step)
-best-layout.json            # Best layout found (252k px, confirmed)
+best-layout.json            # Best layout found (253k px, confirmed)
 requirements.txt            # Python dependencies for the core pipeline
 ml/
 ├── optimize_layout.py      # Surrogate-guided layout search (500k candidates)
