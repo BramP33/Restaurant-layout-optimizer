@@ -93,7 +93,7 @@ def report():
         _line("R² schone holdout", f"{r2:.3f}", "> 0,80", r2 > 0.80,
               f"({oof['model']}, {len(y_true)} layouts)")
         print(f"\n     MAE {mae:,.0f} px   |   Spearman totaal {rho:.3f}")
-        print(f"     Ruisplafond bij deze seed-aantallen: R² <= 0,97")
+        print(f"     Ruisplafond uit de per-seed spreiding: R² ~ 0,99")
     else:
         print(f"  (geen {OOF_FILE.name} — draai eerst train_surrogate.py)")
 

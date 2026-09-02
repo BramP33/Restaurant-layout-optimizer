@@ -7,7 +7,7 @@ Verbeterde versie met:
 - Dedupe op layout: identieke indelingen worden samengevoegd tot een rij met
   een seed-gewogen target, zodat ze niet in train en test tegelijk belanden
 - GroupKFold op layout-sleutel als expliciete garantie tegen datalek
-- Log-ruimte target (waiterDist loopt van ~235k tot ~1,3M px)
+- Log-ruimte target (waiterDist loopt van ~253k tot ~1,3M px)
 - Rapporteert Spearman binnen het beste deciel naast R², en schrijft de
   out-of-fold voorspellingen weg voor evaluate.py
 - Slaat het beste model op
@@ -82,14 +82,23 @@ def load_data(path):
         key = layout_key(variable)
         m   = run["metrics"]
 
+        # Er zitten twee formaten door elkaar in de dataset:
+        #   - met "runs": metrics is het gemiddelde over die sub-runs, dus dit
+        #     record staat voor len(seeds) simulaties.
+        #   - zonder "runs": metrics komt van EEN seed. validate_headless.js
+        #     schrijft per seed een record weg met telkens de volledige
+        #     seedlijst van de batch erin, dus len(seeds) zegt hier niets over
+        #     dit record. Wegen op len(seeds) telt die groep n keer te zwaar
+        #     (n^2 in plaats van n) en scheeft zodra dezelfde layout later met
+        #     een ander aantal seeds opnieuw gevalideerd wordt.
+        weight = n_seeds if "runs" in run else 1
+
         a = agg.setdefault(key, {"variable": variable, "dist": 0.0,
                                  "score": 0.0, "wait": 0.0, "n_seeds": 0})
-        # run["metrics"] is al het gemiddelde over de seeds van die run,
-        # dus wegen op aantal seeds geeft het juiste totaalgemiddelde.
-        a["dist"]    += m["waiterDist"] * n_seeds
-        a["score"]   += m["score"]      * n_seeds
-        a["wait"]    += m["avgWait"]    * n_seeds
-        a["n_seeds"] += n_seeds
+        a["dist"]    += m["waiterDist"] * weight
+        a["score"]   += m["score"]      * weight
+        a["wait"]    += m["avgWait"]    * weight
+        a["n_seeds"] += weight
 
     print(f"  {len(runs)} runs -> {len(agg)} unieke multi-seed layouts")
 

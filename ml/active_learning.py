@@ -77,13 +77,13 @@ def main():
     except ImportError:
         train_script = HERE / "train_surrogate.py"
     result = subprocess.run(
-        ["python3", str(train_script)],
+        [sys.executable, str(train_script)],
         cwd=HERE, capture_output=False
     )
     if result.returncode != 0:
         print("GNN trainingsfout, fallback naar RF…")
         result = subprocess.run(
-            ["python3", str(HERE / "train_surrogate.py")],
+            [sys.executable, str(HERE / "train_surrogate.py")],
             cwd=HERE, capture_output=False
         )
         if result.returncode != 0:
@@ -92,7 +92,7 @@ def main():
 
     print("\nStap 3 — optimizer draaien…")
     subprocess.run(
-        ["python3", str(HERE / "optimize_layout.py"), "--candidates", "500000"],
+        [sys.executable, str(HERE / "optimize_layout.py"), "--candidates", "500000"],
         cwd=HERE, capture_output=False
     )
 

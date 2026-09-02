@@ -12,7 +12,7 @@ The simulator runs a full restaurant floor in the browser: guests arrive, get se
 
 The ML pipeline collects thousands of these simulation runs, trains a surrogate model on the layout data, and uses that model to search for better table arrangements — without running the expensive full simulation for every candidate.
 
-**Result: 31% reduction in waiter travel distance** (367k → 252k pixels), found through surrogate-guided optimization and confirmed via headless browser validation.
+**Result: 31% reduction in waiter travel distance** (367k → 253k pixels), found through surrogate-guided optimization and confirmed via headless browser validation.
 
 ---
 
@@ -54,7 +54,7 @@ score = (servedDrinks × 12) − (avgWait × 3) − (impatientGuests × 25) − 
 Browser sim (batch export)
         │
         ▼
-merge_datasets.py ──► restaurant-sim-merged.json (4,272 unique layouts)
+merge_datasets.py ──► restaurant-sim-merged.json (10,715 runs)
         │
         ▼
 train_surrogate.py  ──► surrogate_model.pkl  (XGBoost, R²=0.663)
@@ -77,9 +77,9 @@ evaluate.py        ──► reports the four headline metrics at any point
 - **Algorithm**: XGBoost (best of RF / XGBoost / GradientBoosting comparison)
 - **Features**: 71 hand-crafted features — raw table positions, per-table distances to bar, corridor width estimates, cluster compactness
 - **Target**: `log(waiterDist)`, back-transformed to pixels on predict. Waiter distance spans 253k–1.3M px, so log space keeps the errors evenly weighted across that range
-- **Deduplication**: identical layouts are merged into a single row with a seed-weighted target. The same layout appears many times in the raw data (re-run later with extra seeds); without this they land in train and test at once and inflate the score
-- **Validation**: `GroupKFold` on the layout key, so one layout can never leak across folds
-- **Performance**: R² = 0.663, MAE = 61,439 px out-of-fold on 4,272 unique layouts
+- **Deduplication**: the 10,715 raw runs collapse to 4,272 unique layouts. `validate_headless.js` writes one record *per seed*, each carrying the batch's full seed list, so the same layout legitimately appears many times. Merging them into one row with a per-simulation weight is what keeps identical layouts out of train and test at the same time
+- **Validation**: `GroupKFold` on the layout key. After deduplication every group holds exactly one row, so this is a safety net rather than a fix — the deduplication is what removes the leak
+- **Performance**: R² = 0.678, MAE = 60,787 px out-of-fold on 4,272 unique layouts
 
 ### Why R² is not the headline metric
 
@@ -87,12 +87,16 @@ Global R² is dominated by the gap between disastrous and mediocre layouts, whic
 
 | Metric | Meaning | Current |
 |---|---|---|
-| Validated top-1 | Best layout after real headless validation | 254,012 px |
-| Calibration error | Mean (predicted − actual) on validated candidates | −0.7% (n=1) |
-| Spearman ρ, best decile | Ranking quality among the top 10% of layouts | 0.374 |
-| R² out-of-fold | Deduplicated, seed-weighted, GroupKFold | 0.663 |
+| Validated top-1 | Best layout after real headless validation | 254,012 px (n=1) |
+| Calibration error | Mean (predicted − actual) on validated candidates | −0.1% (n=1) |
+| Spearman ρ, best decile | Ranking quality among the top 10% of layouts | 0.328 |
+| R² out-of-fold | Deduplicated, weighted per simulation, GroupKFold | 0.678 |
 
-The gap between ρ = 0.85 overall and ρ = 0.37 within the best decile is the single most useful diagnostic in the pipeline: the model separates bad from good easily, but barely ranks the good ones. Simulator noise is not the limit — with 3-seed targets the theoretical ceiling is R² ≈ 0.97.
+The gap between ρ = 0.85 overall and ρ = 0.33 within the best decile is the single most useful diagnostic in the pipeline: the model separates bad from good easily, but barely ranks the good ones. Simulator noise is not the limit — measured against the per-seed spread in the dataset, the ceiling sits near R² ≈ 0.99.
+
+A second systematic effect matters more than the log transform: prediction bias runs from **+10% in the best decile to −21% in the worst**, plain regression to the mean. That is what makes the surrogate unreliable exactly where the optimizer searches.
+
+The first two metrics currently rest on a single validated layout, so treat them as placeholders until a proper validation round lands.
 
 ### GNN Model
 
@@ -112,7 +116,7 @@ Candidate layouts from the optimizer are validated by actually running the simul
 
 | Metric | Baseline (greedy) | Optimized |
 |---|---|---|
-| Waiter travel distance | ~367,532 px | ~252,102 px |
+| Waiter travel distance | ~367,532 px | ~253,102 px |
 | Improvement | — | **31.4%** |
 | Efficiency score | ~−3,800 | ~−3,007 |
 

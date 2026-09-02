@@ -357,7 +357,7 @@ if __name__ == "__main__":
                 mae_info  = f"R²={gnn_r2:.3f}, MAE={gnn_model.val_mae:,.0f} px" if gnn_model.val_mae else f"R²={gnn_r2:.3f}"
                 print(f"GNN: geladen voor gradient-search ({mae_info})")
             else:
-                print(f"GNN: R²={gnn_r2:.3f} — te laag voor gradient-search (drempel R²>0.50)")
+                print(f"GNN: R²={gnn_r2:.3f} — te laag voor gradient-search (drempel R²>0.55)")
         except Exception as e:
             print(f"GNN laden mislukt ({e})")
     print()
