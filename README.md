@@ -118,21 +118,46 @@ Global R² is dominated by the gap between disastrous and mediocre layouts, whic
 
 The gap between ρ = 0.96 overall and ρ = 0.51 within the best decile is the single most useful
 diagnostic in the pipeline: the model separates bad from good easily, but ranks the good ones
-poorly. Chasing that second number turned out to be chasing noise.
+poorly. Ranking inside the frontier is the largest piece of value still on the table.
 
-**The best decile is close to a tie.** Within it the observed spread between layouts is
-sd ≈ 10,100 px while the noise on a 3-seed mean is sd ≈ 10,600 px — subtracting one from the other
-leaves nothing. The nearest-neighbour check agrees: near-identical layouts differ by *less* than
-noise alone would predict (ratio 0.78), so the target is smooth, not rough. Treat the exact zero
-with caution, because selecting a decile on a noisy variable biases that decomposition downward,
-but the direction is unambiguous. At the frontier the layouts are nearly equivalent, and ρ inside
-the best decile is largely measuring seed noise.
+**Simulator noise is not constant across the range**, and missing that is easy to do. Per-seed
+noise runs from sd ≈ 13,200 px among the best layouts to sd ≈ 31,500 px among the worst, against a
+global figure of 18,300 px. Comparing a spread measured *inside the best decile* against the
+*global* noise figure is not a like-for-like comparison, and it manufactures a null result — an
+earlier revision of this section did exactly that and concluded the decile was flat. It is not:
 
-That makes ρ(top decile) > 0.70 close to the wrong target. What matters is *reaching* the
-frontier, not fine-ranking within it — and there the model is strong: ρ = 0.96 overall, steering
-to layouts ~8% better than the best of 10,240 random samples.
+| | sd |
+|---|---|
+| observed spread inside the best decile | 10,144 px |
+| noise on a 3-seed mean, measured locally | 7,621 px |
+| → true spread between layouts (naive) | 6,694 px |
+| → true spread, split-half (decile picked on seed *j*, measured on the other two) | **14,390 px** |
 
-**Four ideas were tried to lift the within-decile ranking. All failed, consistently:**
+The split-half figure is the trustworthy one: selecting on one seed and measuring on the others
+makes the selection independent of the measurement, which the naive decomposition is not. The
+nearest-neighbour check flips with the corrected noise too — near-identical layouts differ by
+slightly *more* than noise predicts (ratio 1.08, not 0.78).
+
+**What better ranking would be worth: 6.8%.** Inside the decile the model itself selects, pick the
+8 best by model prediction versus the 8 best by an oracle that ranks on two seeds — then score both
+on the held-out third seed, so the oracle cannot cherry-pick favourable noise:
+
+```
+evaluation seed 0:  model 370,217 px   oracle 341,288 px
+evaluation seed 1:  model 361,077 px   oracle 342,378 px
+evaluation seed 2:  model 363,506 px   oracle 336,808 px
+                    mean gap 24,776 px  =  6.8%
+```
+
+That is roughly the size of everything the surrogate has bought over random search so far (~8%).
+Frontier ranking is an open problem worth real money here, not a solved or dead one.
+
+The target of ρ(top decile) > 0.70 is still a poor instrument, but for a narrower reason than
+"nothing to rank": it selects the decile on the noisy 3-seed mean and then scores against that same
+noisy quantity, so it understates the model. Judge frontier ranking with a held-out seed, as above.
+
+**Four ideas were tried to lift the within-decile ranking. All failed** — the opportunity is real,
+these particular routes to it are not:
 
 | Attempt | ρ(top decile) |
 |---|---|
@@ -146,7 +171,14 @@ to layouts ~8% better than the best of 10,240 random samples.
 (The LCB rows are measured on a 3-fold split whose μ-only baseline is 0.59, so all three made the
 ranking *worse*, and all three made the selection worse too: picking 8 layouts by μ + κσ gave a
 mean actual of 349k–360k against 345k for μ alone.) No σ estimate correlated with the actual error
-above ρ ≈ 0.12.
+above ρ ≈ 0.12, which is why no value of κ can help: the quantity being weighted carries almost no
+information about where the model is actually wrong. Uncertainty-guided search is not refuted in
+general — these three estimators are.
+
+The specialist row carries a similar caveat: restricting training to the best 25% also cuts the
+training set from 10,240 rows to 2,048, so the experiment shows that *specialising on the data
+already collected* does not pay, not that a specialist model cannot work. Collecting densely inside
+the frontier and retraining there is untested.
 
 **Label noise is not the constraint either.** A model trained on **1-seed** targets ranks as well
 as one trained on 3-seed targets (0.502 vs 0.508) — the learner averages label noise away across
@@ -201,12 +233,17 @@ stated as a range.
 p = 0.06 against the top 12). The win comes from one genuinely excellent layout in the pool, and
 the model ranked it fourth. Validation is doing the selecting, not the surrogate.
 
-Widening the pool does not fix that: a later run validated **24** candidates instead of 8, and its
-best came in at 294,108 px (95% CI 284,531–303,685) — statistically indistinguishable from the
-incumbent, with the model's ranking of its own candidates again at ρ = 0.05. That is the decile
-tie seen from the other end: the candidates are near-equivalent, so which one wins is mostly the
-seed draw. The working recipe is therefore simple — steer into the frontier with the surrogate,
-then validate a handful and keep the best.
+A later run validated **24** candidates instead of 8; its best came in at 294,108 px (95% CI
+284,531–303,685), statistically indistinguishable from the incumbent, with the model ranking its
+own candidates at ρ = 0.05 again. That single comparison does *not* show wider validation is
+useless — with ρ ≈ 0 the best-of-N is an order statistic and must improve with N, and bootstrapping
+within that pool of 24 confirms it (expected best-of-8 297,580 px, best-of-16 294,828 px). What it
+actually shows is that the second run produced a weaker candidate pool. Two pools and one draw
+cannot settle the question.
+
+The working recipe today is therefore: steer into the frontier with the surrogate, then validate a
+handful and keep the best — while noting that the 6.8% oracle gap above is exactly the cost of
+having to do that selection by brute force.
 
 One caveat worth stating plainly: the *average* of the 8 optimizer candidates (326,020 px) is not
 significantly better than the baseline group (335,863 px, p = 0.41). The win comes from one
