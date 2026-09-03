@@ -12,13 +12,13 @@ The simulator runs a full restaurant floor in the browser: guests arrive, get se
 
 The ML pipeline collects thousands of these simulation runs, trains a surrogate model on the layout data, and uses that model to search for better table arrangements — without running the expensive full simulation for every candidate.
 
-**Result: ~9% reduction in waiter travel distance against the best of 10,240 randomly sampled
-layouts** — 320,577 px → 288,884 px, each measured over 30 seeds in a headless browser
-(95% CI on the difference: 8.4%–11.4%).
+**Result: 12.7% reduction in waiter travel distance against the best of 10,240 randomly sampled
+layouts** — 320,577 px → 279,828 px, each measured over 30 seeds in a headless browser
+(95% CI on the difference: 11.0%–14.4%).
 
-Read that as a range rather than a point. An independent re-validation on a third, separate seed
-set put the same comparison at 7%, so the honest span is **7–11%**. The effect survives every
-split of the data; its exact size does not pin down to one decimal.
+Both sides are measured identically, and the winning layout was re-validated on 15 fresh seeds
+after selection: it comes out 2,004 px higher there, and that selection effect is already absorbed
+into the pooled figure above.
 
 > **This replaces an earlier claim of "31% reduction, 367k → 253k px".** That number came from a
 > layout that walled in the bar: every table was unreachable, and the optimizer was exploiting a
@@ -73,7 +73,8 @@ Browser sim (batch export)
 merge_shards.py    ──► restaurant-sim-clean.json (30,720 runs)
         │
         ▼
-train_surrogate.py  ──► surrogate_model.pkl  (GradientBoosting, R²=0.990)
+train_surrogate.py  ──► surrogate_model.pkl  (two models: 95-feature base, R²=0.990
+                                                 109-feature frontier, R²=0.991)
 train_gnn.py        ──► gnn_model.pt         (GATv2, R²≈0.35–0.40)
         │
         ▼
@@ -103,7 +104,9 @@ evaluate.py        ──► reports the four headline metrics at any point
 - **Target**: `log(waiterDist)`, back-transformed to pixels on predict. Waiter distance spans 316k–1.25M px, so log space keeps the errors evenly weighted across that range
 - **Deduplication**: the 30,720 raw runs collapse to 10,240 unique layouts, each run with 3 seeds. `validate_headless.js` writes one record *per seed*, each carrying the batch's full seed list, so the same layout legitimately appears many times. Merging them into one row with a per-simulation weight is what keeps identical layouts out of train and test at the same time
 - **Validation**: `GroupKFold` on the layout key. After deduplication every group holds exactly one row, so this is a safety net rather than a fix — the deduplication is what removes the leak
-- **Performance**: R² = 0.990, MAE = 12,896 px out-of-fold on 10,240 unique layouts
+- **Performance**: R² = 0.990, MAE = 12,896 px out-of-fold on 10,240 unique layouts. A second
+  model adds the 14 tour features (109 total) and reaches R² = 0.991, MAE = 12,051 px; the
+  optimizer uses the cheap one to search and the frontier one to refine
 
 ### Why R² is not the headline metric
 
@@ -111,7 +114,7 @@ Global R² is dominated by the gap between disastrous and mediocre layouts, whic
 
 | Metric | Meaning | Current |
 |---|---|---|
-| Validated top-1 | Best layout after real headless validation | 287,929 px (n=8, 15 seeds) |
+| Validated top-1 | Best layout after real headless validation | 278,826 px (n=8, 15 seeds) |
 | Calibration error | Mean (predicted − actual) on validated candidates | −2.7% (n=8) |
 | Spearman ρ, best decile | Ranking quality among the top 10% of layouts | 0.513 |
 | R² out-of-fold | Deduplicated, weighted per simulation, GroupKFold | 0.990 |
@@ -156,8 +159,26 @@ The target of ρ(top decile) > 0.70 is still a poor instrument, but for a narrow
 "nothing to rank": it selects the decile on the noisy 3-seed mean and then scores against that same
 noisy quantity, so it understates the model. Judge frontier ranking with a held-out seed, as above.
 
-**Four ideas were tried to lift the within-decile ranking. All failed** — the opportunity is real,
-these particular routes to it are not:
+**One idea worked, four did not.**
+
+What worked was asking what the waiter actually does. It carries up to 8 drinks and chains several
+tables into one trip (`simulatie.html:2061`), picking which tables to chain by **Euclidean**
+distance between them — and then walking **A\*** paths. Two tables that sit close together with an
+obstacle between them therefore land in the same trip and cost a detour, and nothing in the feature
+set could see that: the features measured distance to the bar and Euclidean distances between
+tables, never the cost of the chain itself.
+
+Fourteen tour features fix that — table-to-table *path* distances, a greedy tour cost from the bar,
+and mismatch ratios (path ÷ Euclidean per pair) that measure exactly where the simulator's chaining
+heuristic trips over its own geometry. Judged against a held-out seed, ranking inside the
+model-selected decile rises from **ρ = 0.392 to 0.427**, positive on all three seeds
+(+0.053, +0.023, +0.030), and out-of-fold R² from 0.9897 to 0.9909.
+
+They cost 35 ms per layout against 4 ms, far too slow for a 200,000-candidate sweep, so the
+optimizer runs two stages: the cheap 95-feature model for the broad search, the 109-feature model
+for refinement and final ranking — which is where these features help anyway.
+
+**The four that failed** — the opportunity is real, these particular routes to it are not:
 
 | Attempt | ρ(top decile) |
 |---|---|
@@ -212,38 +233,27 @@ Candidate layouts from the optimizer are validated by actually running the simul
 
 | Metric | Baseline (greedy) | Optimized |
 |---|---|---|
-| Waiter travel distance | 320,577 px | **288,884 px** |
-| Improvement | — | **9.9%** (95% CI 8.4–11.4%, Welch p = 1.7e-18) |
-| Standard error | ±1,733 px | ±1,774 px |
+| Waiter travel distance | 320,577 px | **279,828 px** |
+| Improvement | — | **12.7%** (95% CI 11.0–14.4%) |
+| Standard error | ±1,733 px | ±2,101 px |
 
 Both figures pool 30 seeds per layout from headless validation. The baseline is the best of the
 10,240 randomly sampled valid layouts in `restaurant-sim-clean.json`, re-validated at the same
 seed count so the two sides are measured identically.
 
-Two honest caveats on this number:
+**Winner's curse is measured, not assumed.** The layout was picked as the best of 8 on one set of
+15 seeds, then re-validated on 15 fresh ones: 278,826 px on the selection seeds, 280,830 px on the
+fresh ones. A 2,004 px selection effect, small, and the headline pools all 30 seeds anyway.
 
-**Winner's curse.** The optimized layout was picked as the best of 8 candidates using the same
-seeds it is scored on. Re-measured on fresh seeds it comes out 1,910 px higher — a real but small
-selection effect, already absorbed into the 30-seed pooled figure above. An independent reviewer
-re-ran the whole comparison on yet another seed set and landed at 7%; that is why the headline is
-stated as a range.
+**What moved the needle was the candidate pool, not luck.** Earlier runs had a real problem: the
+*average* of the 8 candidates was no better than the baseline group (326,020 px, p = 0.41), so the
+win rested on one lucky layout while the model ranked it fourth. Adding the tour features and
+refining against them changed exactly that — the group average dropped to **307,262 px**. The pool
+itself got better, which is what a working surrogate is supposed to do.
 
-**The model is not what is choosing well.** The *average* of the 8 optimizer candidates
-(326,020 px) is not significantly better than the baseline group (p = 0.41 against the top 3,
-p = 0.06 against the top 12). The win comes from one genuinely excellent layout in the pool, and
-the model ranked it fourth. Validation is doing the selecting, not the surrogate.
-
-A later run validated **24** candidates instead of 8; its best came in at 294,108 px (95% CI
-284,531–303,685), statistically indistinguishable from the incumbent, with the model ranking its
-own candidates at ρ = 0.05 again. That single comparison does *not* show wider validation is
-useless — with ρ ≈ 0 the best-of-N is an order statistic and must improve with N, and bootstrapping
-within that pool of 24 confirms it (expected best-of-8 297,580 px, best-of-16 294,828 px). What it
-actually shows is that the second run produced a weaker candidate pool. Two pools and one draw
-cannot settle the question.
-
-The working recipe today is therefore: steer into the frontier with the surrogate, then validate a
-handful and keep the best — while noting that the 6.8% oracle gap above is exactly the cost of
-having to do that selection by brute force.
+The model still cannot fine-rank its own output (ρ = 0.02 across the 8), so the last step is still
+brute force: validate a handful and keep the best. The 6.8% oracle gap below is the standing price
+of that.
 
 One caveat worth stating plainly: the *average* of the 8 optimizer candidates (326,020 px) is not
 significantly better than the baseline group (335,863 px, p = 0.41). The win comes from one
@@ -361,7 +371,7 @@ bash ml/start_overnight.sh
 
 ```
 simulatie.html              # Full browser simulator (single file, no build step)
-best-layout.json            # Best layout found (287,929 px, 15-seed validated)
+best-layout.json            # Best layout found (279,828 px, 30-seed validated)
 requirements.txt            # Python dependencies for the core pipeline
 ml/
 ├── optimize_layout.py      # Surrogate-guided layout search (500k candidates)

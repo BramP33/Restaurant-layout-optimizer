@@ -442,3 +442,94 @@ def path_features(variable, fixed=()):
         float(np.percentile(floor_d, 90)) if floor_d.size else 0.0,
         float(n_unreachable),
     ]
+
+
+# ── Tour-features ────────────────────────────────────────────────────────────
+
+N_TOUR_FEATURES = 14
+
+
+def tour_features(variable):
+    """
+    Wat de ober werkelijk loopt: de kosten van een rit langs meerdere tafels.
+
+    De ober draagt tot acht drankjes en bouwt een plan van meerdere tafels
+    (simulatie.html:2061). Hij kettingt die tafels aan elkaar op EUCLIDISCHE
+    afstand tot de ankertafel, maar loopt vervolgens A*-paden. Twee tafels die
+    hemelsbreed naast elkaar liggen met een obstakel ertussen belanden dus in
+    dezelfde rit en kosten een omweg -- en geen enkele bestaande feature ziet
+    dat, want die meten alleen de afstand tot de bar en Euclidische
+    paarafstanden.
+
+    Vandaar de mismatch-features (pad gedeeld door hemelsbreed per tafelpaar):
+    ze meten precies waar de kettingheuristiek van de simulator zichzelf in de
+    voet schiet.
+
+    Duur: acht extra Dijkstra-sweeps, ~34 ms per layout tegen ~4 ms voor
+    path_features. Te duur voor een brede zoektocht, de moeite waard om de
+    kopgroep te herordenen -- en daar helpen ze ook het meest.
+    """
+    blocked = build_blocked(variable)
+    n       = len(variable)
+    BIG     = 10.0 * ROOM_W
+
+    fields, pts = [], []
+    for t in variable:
+        bp = None
+        for p in service_points(t):
+            if nearest_open(blocked, p, radius=3) is not None:
+                bp = p
+                break
+        pts.append(bp)
+        fields.append(distance_field(blocked, bp) if bp is not None else None)
+
+    bar = distance_field(blocked, BAR_DOCK)
+
+    def at(field, p):
+        if field is None or p is None:
+            return BIG
+        c = nearest_open(blocked, p, radius=3)
+        v = field[c] if c is not None else np.inf
+        return BIG if not np.isfinite(v) else float(v)
+
+    M = np.full((n, n), BIG)      # padafstand tafel -> tafel
+    E = np.zeros((n, n))          # hemelsbreed, wat de simulator gebruikt
+    for i in range(n):
+        M[i, i] = 0.0
+        for j in range(n):
+            if i == j:
+                continue
+            M[i, j] = at(fields[i], pts[j])
+            E[i, j] = math.hypot(variable[i]["x"] - variable[j]["x"],
+                                 variable[i]["y"] - variable[j]["y"])
+    bd = np.array([at(bar, p) for p in pts])
+
+    off  = ~np.eye(n, dtype=bool)
+    pair = M[off]
+    mism = pair / np.maximum(E[off], 1.0)
+
+    # Greedy rit: bar -> steeds de dichtstbijzijnde ongeziene tafel -> bar.
+    cur  = int(np.argmin(bd))
+    tour = bd[cur]
+    unvisited = set(range(n)) - {cur}
+    while unvisited:
+        nxt   = min(unvisited, key=lambda j: M[cur, j])
+        tour += M[cur, nxt]
+        cur   = nxt
+        unvisited.discard(cur)
+    tour += bd[cur]
+
+    nn = np.array([M[i][np.arange(n) != i].min() for i in range(n)])
+    # De drie tafels die de simulator zou aanketenen: Euclidisch het dichtst.
+    chain = np.array([M[i, np.argsort(E[i] + np.eye(n)[i] * 1e9)[:3]].mean()
+                      for i in range(n)])
+
+    return [
+        float(pair.mean()), float(pair.min()), float(pair.max()), float(pair.std()),
+        float(tour),
+        float(tour / max(2.0 * bd.sum(), 1.0)),   # winst van ketenen t.o.v. losse ritten
+        float(mism.mean()), float(mism.max()),    # waar de heuristiek misgrijpt
+        float(nn.mean()), float(nn.max()),
+        float(chain.mean()), float(chain.std()),
+        float((mism > 1.5).sum()), float((mism > 2.0).sum()),
+    ]

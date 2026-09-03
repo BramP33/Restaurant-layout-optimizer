@@ -125,10 +125,11 @@ def load_data(path):
 
     print(f"  {len(runs)} runs -> {len(agg)} unieke multi-seed layouts")
 
-    X_rows, y_rows, w_rows, meta_rows = [], [], [], []
+    X_rows, y_rows, w_rows, meta_rows, var_rows = [], [], [], [], []
     for a in agg.values():
         n = a["n_seeds"]
         X_rows.append(extract_features_from_list(a["variable"]))
+        var_rows.append(a["variable"])
         y_rows.append(a["dist"] / n)
         w_rows.append(n)
         meta_rows.append({
@@ -143,7 +144,7 @@ def load_data(path):
     X = np.array(X_rows, dtype=np.float32)
     y = np.array(y_rows, dtype=np.float64)
     w = np.array(w_rows, dtype=np.float64)
-    return X, y, w, max_len, meta_rows
+    return X, y, w, max_len, meta_rows, var_rows
 
 
 def extract_features_from_list(variable):
@@ -231,6 +232,19 @@ def extract_features_from_list(variable):
     path = pg.path_features(variable)
 
     return raw + eng + path
+
+
+def extract_frontier_features(variable):
+    """
+    Basisfeatures plus de tour-features.
+
+    Apart gehouden omdat ze acht keer duurder zijn (~35 ms tegen ~4 ms per
+    layout): te traag om 200.000 kandidaten mee af te zoeken, de moeite waard
+    om de kopgroep mee te herordenen. Gemeten tegen een ACHTERGEHOUDEN seed
+    tilt dit de rangschikking binnen het door het model gekozen deciel van
+    rho 0,392 naar 0,427, consistent over alle drie de seeds. Zie README.
+    """
+    return extract_features_from_list(variable) + pg.tour_features(variable)
 
 
 # ── Modellen ─────────────────────────────────────────────────
@@ -324,12 +338,28 @@ if __name__ == "__main__":
 
     data_path = _find_data(cli.data)
     print(f"Dataset: {data_path.name}")
-    X, y, w, feat_len, meta_rows = load_data(data_path)
+    X, y, w, feat_len, meta_rows, variables = load_data(data_path)
 
     # Na dedupe is elke rij een unieke layout; de groepen houden de garantie
     # expliciet dat eenzelfde indeling nooit over folds heen kan lekken.
     groups = np.arange(len(y))
     model, model_name, best = train_and_evaluate(X, y, w, groups)
+
+    # Frontier-model: dezelfde data, plus de tour-features. De optimizer
+    # gebruikt het basismodel voor de brede zoektocht en dit model om de
+    # kopgroep te herordenen -- precies waar de tour-features helpen.
+    print("\n  Frontier-model (basis + tour-features)…")
+    T  = np.array([pg.tour_features(v) for v in variables], dtype=np.float32)
+    XF = np.hstack([X, T])
+    oof_f = np.zeros(len(y))
+    for tr, te in GroupKFold(n_splits=5).split(XF, y, groups=groups):
+        m = LogTargetModel(clone(build_models()[model_name]))
+        m.fit(XF[tr], y[tr], sample_weight=w[tr])
+        oof_f[te] = m.predict(XF[te])
+    print(f"    {XF.shape[1]} features  R²={r2_score(y, oof_f):.4f}  "
+          f"MAE={mean_absolute_error(y, oof_f):,.0f} px")
+    model_frontier = LogTargetModel(clone(build_models()[model_name]))
+    model_frontier.fit(XF, y, sample_weight=w)
 
     with open(OOF_FILE, "w") as f:
         json.dump({"model":   model_name,
@@ -338,7 +368,9 @@ if __name__ == "__main__":
                    "n_seeds": w.tolist()}, f)
 
     joblib.dump({
-        "model":         model,
+        "model":            model,
+        "model_frontier":   model_frontier,
+        "feat_len_frontier": int(XF.shape[1]),
         "model_name":    model_name,
         "feature_names": [f"f{i}" for i in range(feat_len)],
         "feat_len":      feat_len,

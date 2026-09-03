@@ -158,11 +158,12 @@ def generate_batch(N, rng, max_tries=200):
 
 # ── Feature extractie (zelfde als train_surrogate.py) ────────────────────────
 
-def extract_features(tables):
-    from train_surrogate import extract_features_from_list
+def extract_features(tables, frontier=False):
+    from train_surrogate import extract_features_from_list, extract_frontier_features
     var = [t for t in tables if t["size"] != "custom"]
     var.sort(key=lambda t: (-t["w"], t["x"], t["y"]))
-    return extract_features_from_list(var)
+    return (extract_frontier_features(var) if frontier
+            else extract_features_from_list(var))
 
 
 def pad(rows, feat_len):
@@ -172,7 +173,7 @@ def pad(rows, feat_len):
 
 # ── Scoring helper (duck-typed voor RF én GNN) ────────────────────────────────
 
-def _score_layouts(model, feat_len, layouts):
+def _score_layouts(model, feat_len, layouts, frontier=False):
     """
     Scoort layouts met RF of GNN — transparant voor de aanroeper.
 
@@ -207,7 +208,7 @@ def _score_layouts(model, feat_len, layouts):
         ok, _unreachable, _trapped = pg.layout_valid(pg.build_blocked(var), var)
         if ok:
             keep.append(i)
-            rows.append(extract_features(layout))
+            rows.append(extract_features(layout, frontier=frontier))
     if keep:
         scores[keep] = model.predict(pad(rows, feat_len))
     return scores
@@ -249,7 +250,8 @@ def random_search(model, feat_len, n_candidates, rng, batch=50_000):
 
 # ── Local refinement ──────────────────────────────────────────────────────────
 
-def local_refine(model, feat_len, candidates, scores, top_k, n_rounds, rng):
+def local_refine(model, feat_len, candidates, scores, top_k, n_rounds, rng,
+                 frontier=False):
     if not candidates:
         print("Geen kandidaten voor refinement.")
         return candidates, scores
@@ -259,6 +261,13 @@ def local_refine(model, feat_len, candidates, scores, top_k, n_rounds, rng):
 
     pool   = [list(c) for c in candidates[:top_k]]
     pscore = list(scores[:top_k])
+
+    # De binnenkomende scores komen van het basismodel. Verfijnen we met het
+    # frontier-model, dan moet de startpool op dezelfde schaal staan -- anders
+    # vergelijkt de acceptatietoets hieronder appels met peren en wordt een
+    # perturbatie aangenomen of verworpen op een schaalverschil.
+    if frontier and pool:
+        pscore = list(_score_layouts(model, feat_len, pool, frontier=True))
 
     for _ in range(n_rounds):
         perturbed, origins = [], []
@@ -283,7 +292,7 @@ def local_refine(model, feat_len, candidates, scores, top_k, n_rounds, rng):
 
         if not perturbed:
             continue
-        new_sc = _score_layouts(model, feat_len, perturbed)
+        new_sc = _score_layouts(model, feat_len, perturbed, frontier=frontier)
         for k, ci in enumerate(origins):
             if new_sc[k] < pscore[ci]:
                 pool[ci]   = perturbed[k]
@@ -381,6 +390,12 @@ if __name__ == "__main__":
     feat_len = len(saved["feature_names"])
     print(f"Model: {saved['model_name']} — {feat_len} features — target={saved['target']}")
 
+    # Optioneel; een pickle van voor de tweetrapsopzet heeft het niet.
+    model_frontier    = saved.get("model_frontier")
+    feat_len_frontier = saved.get("feat_len_frontier")
+    if model_frontier is None:
+        print("Frontier-model niet in de pickle — verfijning draait op het basismodel")
+
     # ── GNN laden voor gradiëntoptimalisatie (optioneel) ──
     gnn_model = None
     gnn_path  = ROOT / "gnn_model.pt"
@@ -399,10 +414,25 @@ if __name__ == "__main__":
             print(f"GNN laden mislukt ({e})")
     print()
 
+    # Twee trappen. De brede zoektocht draait op het basismodel, want de
+    # tour-features kosten 35 ms per layout en dat is bij 200.000 kandidaten
+    # uren. De verfijning draait op het frontier-model: daar zitten we in de
+    # kopgroep, en juist daar tillen die features de rangschikking omhoog
+    # (rho 0,392 -> 0,427 tegen een achtergehouden seed).
     layouts, scores = random_search(model, feat_len, cfg["candidates"], rng)
-    layouts, scores = local_refine(model, feat_len, layouts, scores,
-                                   top_k=cfg["refine_top"],
-                                   n_rounds=cfg["refine_rounds"], rng=rng)
+
+    if model_frontier is not None:
+        print(f"\nFrontier-model: {feat_len_frontier} features "
+              f"(basis + tour) voor de verfijning")
+        layouts, scores = local_refine(model_frontier, feat_len_frontier,
+                                       layouts, scores,
+                                       top_k=cfg["refine_top"],
+                                       n_rounds=cfg["refine_rounds"], rng=rng,
+                                       frontier=True)
+    else:
+        layouts, scores = local_refine(model, feat_len, layouts, scores,
+                                       top_k=cfg["refine_top"],
+                                       n_rounds=cfg["refine_rounds"], rng=rng)
 
     # ── Gradiëntoptimalisatie met GNN (als beschikbaar en goed genoeg) ──
     if gnn_model is not None:
