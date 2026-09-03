@@ -473,17 +473,21 @@ def tour_features(variable):
     n       = len(variable)
     BIG     = 10.0 * ROOM_W
 
+    bar = distance_field(blocked, BAR_DOCK)
+
+    # Het anker per tafel MOET op de obervloer liggen. Het eerste servicepunt
+    # met een vrije cel in de buurt pakken is niet genoeg: dat kan een
+    # afgesloten nis naast de vloer zijn, en dan meet het afstandsveld vanaf
+    # dat punt een gebied waar geen ober ooit komt. Op de trainingsset gaf dat
+    # 15% van de layouts een fantoomstraf van BIG px -- allemaal volledig
+    # geldige indelingen -- en dat draaide het teken van de features om.
+    # table_access kiest via het barveld en is daarmee wel vloerbewust: een
+    # onbereikbaar servicepunt heeft afstand inf en wint nooit.
     fields, pts = [], []
     for t in variable:
-        bp = None
-        for p in service_points(t):
-            if nearest_open(blocked, p, radius=3) is not None:
-                bp = p
-                break
+        _d, bp = table_access(blocked, bar, t)
         pts.append(bp)
         fields.append(distance_field(blocked, bp) if bp is not None else None)
-
-    bar = distance_field(blocked, BAR_DOCK)
 
     def at(field, p):
         if field is None or p is None:
@@ -519,6 +523,11 @@ def tour_features(variable):
         unvisited.discard(cur)
     tour += bd[cur]
 
+    # Getest en verworpen: een rit in de volgorde die de simulator werkelijk
+    # kiest (Euclidisch sorteren vanaf de bar, simulatie.html:2091) in plaats
+    # van de greedy volgorde hieronder. Over 9 metingen leverde die extra
+    # feature niets op -- drho +0,037 tegen +0,039 zonder -- dus hij is er
+    # weer uit. De greedy rit blijft, als maat voor hoe duur de vloer is.
     nn = np.array([M[i][np.arange(n) != i].min() for i in range(n)])
     # De drie tafels die de simulator zou aanketenen: Euclidisch het dichtst.
     chain = np.array([M[i, np.argsort(E[i] + np.eye(n)[i] * 1e9)[:3]].mean()

@@ -62,35 +62,33 @@ def report():
     if VAL_FILE.exists():
         val   = json.load(open(VAL_FILE))
         saved = joblib.load(MODEL_FILE)
-        # Het frontier-model heeft de kandidaten gekozen, dus daar reken je
-        # ze ook mee na. Oude pickles hebben het niet; dan het basismodel.
-        if saved.get("model_frontier") is not None:
-            model    = saved["model_frontier"]
-            feat_len = saved["feat_len_frontier"]
-            use_frontier = True
-        else:
-            model, feat_len = saved["model"], saved["feat_len"]
-            use_frontier = False
 
         best_actual = min(v["actual_dist"] for v in val)
         _line("Gevalideerde top-1", f"{best_actual:,.0f} px", "< 240.000 px",
               best_actual < 240_000, f"(n={len(val)})")
 
-        errs = []
-        for v in val:
-            if "tables" not in v:
-                continue
-            pred = float(model.predict(
-                _features(v["tables"], feat_len, frontier=use_frontier))[0])
-            errs.append((pred - v["actual_dist"]) / v["actual_dist"])
-        if errs:
-            calib = float(np.mean(errs)) * 100
-            _line("Kalibratiefout (nu)", f"{calib:+.1f}%", "< 3%",
-                  abs(calib) < 3, f"(n={len(errs)})")
+        # De kandidaten in dit bestand zijn door het frontier-model GEKOZEN als
+        # de laagste voorspellingen. Datzelfde model op zijn eigen selectie
+        # afrekenen vleit: de winner's curse zit in de voorspelling zelf, dus
+        # de fout oogt kleiner dan hij is. Het basismodel heeft de keuze niet
+        # gemaakt en is daarmee de schonere schatter -- dat getal telt voor het
+        # doel. Het frontier-getal staat erbij, expliciet als optimistisch.
+        def _calib(model, feat_len, frontier):
+            errs = [(float(model.predict(_features(v["tables"], feat_len,
+                                                   frontier=frontier))[0])
+                     - v["actual_dist"]) / v["actual_dist"]
+                    for v in val if "tables" in v]
+            return (float(np.mean(errs)) * 100, len(errs)) if errs else (None, 0)
 
-        old = [(v["predicted_dist"] - v["actual_dist"]) / v["actual_dist"] for v in val]
-        print(f"     ter vergelijking: het opgeslagen model voorspelde destijds "
-              f"{np.mean(old)*100:+.1f}%")
+        calib, n_c = _calib(saved["model"], saved["feat_len"], False)
+        if calib is not None:
+            _line("Kalibratiefout (basismodel)", f"{calib:+.1f}%", "< 3%",
+                  abs(calib) < 3, f"(n={n_c})")
+
+        if saved.get("model_frontier") is not None:
+            fc, _ = _calib(saved["model_frontier"], saved["feat_len_frontier"], True)
+            print(f"     het frontier-model, dat deze kandidaten zelf koos, komt op "
+                  f"{fc:+.1f}% — optimistisch vertekend")
     else:
         print(f"  (geen {VAL_FILE.name} — draai eerst validate_headless.js)")
 

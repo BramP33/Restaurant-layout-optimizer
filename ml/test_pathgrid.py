@@ -116,5 +116,49 @@ def main():
     return 0
 
 
+def test_tour_features():
+    """
+    Tour-features op geldige layouts mogen nooit de strafwaarde raken.
+
+    De eerste versie koos per tafel het eerste servicepunt met een vrije cel
+    in de buurt, zonder te toetsen of dat punt op de obervloer lag. Een
+    afgesloten nis telde dus mee, 15% van de geldige layouts kreeg een
+    fantoomstraf van BIG px, en de correlaties draaiden van teken om. Deze
+    test bewaakt precies dat: geldige layout in, eindige afstanden uit.
+    """
+    import json
+    import numpy as np
+    import pathgrid as pg
+
+    runs = json.loads((ROOT / "restaurant-sim-clean.json").read_text())
+    seen, layouts = set(), []
+    for r in runs:
+        var = [t for t in r["tables"] if t["size"] != "custom"]
+        var.sort(key=lambda t: (-t["w"], t["x"], t["y"]))
+        key = tuple((round(t["x"], 1), round(t["y"], 1), t["size"], t["rotation"]) for t in var)
+        if key in seen:
+            continue
+        seen.add(key)
+        layouts.append(var)
+        if len(layouts) >= 300:
+            break
+
+    BIG = 10.0 * pg.ROOM_W
+    bad = 0
+    for lay in layouts:
+        assert pg.layout_valid(pg.build_blocked(lay), lay)[0], "testset moet geldig zijn"
+        f = pg.tour_features(lay)
+        assert len(f) == pg.N_TOUR_FEATURES, f"{len(f)} != {pg.N_TOUR_FEATURES}"
+        if max(f[:4]) >= BIG or f[4] >= BIG:
+            bad += 1
+
+    print(f"tour_features: {len(layouts)} geldige layouts, {bad} met strafwaarde")
+    assert bad == 0, f"{bad} geldige layouts kregen een fantoomstraf"
+    print("OK: tour-features raken de strafwaarde niet op geldige layouts.")
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    rc = main()
+    if rc == 0:
+        test_tour_features()
+    sys.exit(rc)
