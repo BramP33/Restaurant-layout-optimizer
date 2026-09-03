@@ -118,23 +118,44 @@ Global R² is dominated by the gap between disastrous and mediocre layouts, whic
 
 The gap between ρ = 0.96 overall and ρ = 0.51 within the best decile is the single most useful
 diagnostic in the pipeline: the model separates bad from good easily, but ranks the good ones
-poorly. Two separate limits produce that gap, and only one of them is the model's fault.
+poorly. Chasing that second number turned out to be chasing noise.
 
-**Measurement noise caps it.** Within the best decile the *observed* spread between layouts is
-sd ≈ 10,100 px, but that already contains the measurement noise: the noise on a 3-seed mean is
-sd ≈ 7,600 px, leaving a true spread of only ≈ 6,700 px. Signal is smaller than noise, so even a
-perfect model would score only ρ ≈ 0.62–0.64 there. Reaching the target of 0.70 needs 5 seeds per
-layout, not 3 (ceiling ≈ 0.73); 9 seeds would allow ≈ 0.82. Collecting *more layouts* does nothing for this — measured across
-1,000 → 10,240 layouts, ρ in the best decile bounces between 0.14 and 0.28 with no trend.
+**The best decile is close to a tie.** Within it the observed spread between layouts is
+sd ≈ 10,100 px while the noise on a 3-seed mean is sd ≈ 10,600 px — subtracting one from the other
+leaves nothing. The nearest-neighbour check agrees: near-identical layouts differ by *less* than
+noise alone would predict (ratio 0.78), so the target is smooth, not rough. Treat the exact zero
+with caution, because selecting a decile on a noisy variable biases that decomposition downward,
+but the direction is unambiguous. At the frontier the layouts are nearly equivalent, and ρ inside
+the best decile is largely measuring seed noise.
 
-**The remaining gap is the model's.** At 0.51 against a ceiling of 0.62 there is real room left,
-and the sharpest symptom is that the model cannot rank its own output: across the 8 validated
-candidates, predicted versus actual gives ρ = 0.10. The best layout it produced was the one it
-ranked fourth. Candidate *generation* is working; candidate *selection* is not, which is why the
-next step is optimizing a lower confidence bound (μ + κσ) rather than μ.
+That makes ρ(top decile) > 0.70 close to the wrong target. What matters is *reaching* the
+frontier, not fine-ranking within it — and there the model is strong: ρ = 0.96 overall, steering
+to layouts ~8% better than the best of 10,240 random samples.
+
+**Four ideas were tried to lift the within-decile ranking. All failed, consistently:**
+
+| Attempt | ρ(top decile) |
+|---|---|
+| baseline (μ only) | 0.51 |
+| LCB, bootstrap-ensemble σ | 0.57 |
+| LCB, random-forest σ | 0.58 |
+| LCB, k-NN-distance σ | 0.54 |
+| specialist trained on best 25% | 0.50 |
+| deeper trees / 3× more trees | 0.50 / 0.52 |
+
+(The LCB rows are measured on a 3-fold split whose μ-only baseline is 0.59, so all three made the
+ranking *worse*, and all three made the selection worse too: picking 8 layouts by μ + κσ gave a
+mean actual of 349k–360k against 345k for μ alone.) No σ estimate correlated with the actual error
+above ρ ≈ 0.12.
+
+**Label noise is not the constraint either.** A model trained on **1-seed** targets ranks as well
+as one trained on 3-seed targets (0.502 vs 0.508) — the learner averages label noise away across
+10,240 layouts. More seeds therefore improves how well a result can be *measured*, not how well
+the model ranks. Collecting more *layouts* does nothing either: from 1,000 to 10,240 layouts,
+R² climbs 0.85 → 0.95 but ρ in the best decile shows no trend at all.
 
 For reference, the noise ceiling on global R² is 0.9966 for a 3-seed mean, so R² = 0.990 still
-leaves headroom.
+leaves headroom on the global metric.
 
 Prediction bias used to be the second systematic effect, running from **+10% in the best decile to
 −21% in the worst** — plain regression to the mean, which made the surrogate unreliable exactly
@@ -178,8 +199,14 @@ stated as a range.
 **The model is not what is choosing well.** The *average* of the 8 optimizer candidates
 (326,020 px) is not significantly better than the baseline group (p = 0.41 against the top 3,
 p = 0.06 against the top 12). The win comes from one genuinely excellent layout in the pool, and
-the model ranked it fourth. Validation is doing the selecting, not the surrogate — which is the
-weakness described under [Why R² is not the headline metric](#why-r-is-not-the-headline-metric).
+the model ranked it fourth. Validation is doing the selecting, not the surrogate.
+
+Widening the pool does not fix that: a later run validated **24** candidates instead of 8, and its
+best came in at 294,108 px (95% CI 284,531–303,685) — statistically indistinguishable from the
+incumbent, with the model's ranking of its own candidates again at ρ = 0.05. That is the decile
+tie seen from the other end: the candidates are near-equivalent, so which one wins is mostly the
+seed draw. The working recipe is therefore simple — steer into the frontier with the surrogate,
+then validate a handful and keep the best.
 
 One caveat worth stating plainly: the *average* of the 8 optimizer candidates (326,020 px) is not
 significantly better than the baseline group (335,863 px, p = 0.41). The win comes from one
