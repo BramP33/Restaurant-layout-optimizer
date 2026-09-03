@@ -17,7 +17,9 @@ Gebruik:
     python3 train_surrogate.py
 """
 
+import argparse
 import json
+
 import numpy as np
 from pathlib import Path
 from sklearn.base import clone
@@ -26,6 +28,7 @@ from sklearn.metrics import mean_absolute_error, r2_score
 from sklearn.model_selection import GroupKFold
 from scipy.stats import spearmanr
 
+import pathgrid as pg
 from log_target import LogTargetModel
 import xgboost as xgb  # type: ignore
 import joblib
@@ -44,10 +47,26 @@ BAR_DOCK_Y = 80
 
 # ── Data laden ────────────────────────────────────────────────────────────────
 
-def _find_data():
-    merged = ROOT / "restaurant-sim-merged.json"
-    if merged.exists():
-        return merged
+def _find_data(explicit=None):
+    """
+    Kiest de dataset. Volgorde is niet willekeurig.
+
+    restaurant-sim-clean.json komt uit de her-collectie na de pathfinding-fix
+    en is de enige set waarin geen enkele layout de bar kan inmetselen.
+    restaurant-sim-merged.json is de oude set: die bevat de geexploiteerde
+    runs. Hij staat nog wel in de zoekvolgorde -- als de schone set ontbreekt
+    is een oud model beter dan geen model -- maar komt pas na clean, zodat hij
+    niet meer per ongeluk gepakt wordt. Geef --data mee om expliciet te kiezen.
+    """
+    if explicit:
+        path = Path(explicit)
+        if not path.exists():
+            raise FileNotFoundError(f"Dataset niet gevonden: {path}")
+        return path
+    for name in ("restaurant-sim-clean.json", "restaurant-sim-merged.json"):
+        candidate = ROOT / name
+        if candidate.exists():
+            return candidate
     files = sorted(ROOT.glob("restaurant-sim-batch-*.json"))
     if files:
         return files[-1]
@@ -205,7 +224,13 @@ def extract_features_from_list(variable):
         min_gap_bar,                      # ruimte naar bar-wand
     ]
 
-    return raw + eng
+    # Padfeatures: de eng-lijst hierboven is volledig Euclidisch, terwijl het
+    # target een A*-padlengte is. Een tafel die een doorgang dichtzet is
+    # hemelsbreed onzichtbaar. pathgrid bouwt hetzelfde loopgrid als de
+    # simulator en levert echte padafstanden vanaf de bardock.
+    path = pg.path_features(variable)
+
+    return raw + eng + path
 
 
 # ── Modellen ─────────────────────────────────────────────────
@@ -292,7 +317,12 @@ def train_and_evaluate(X, y, w, groups):
 # ── Main ──────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    data_path = _find_data()
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--data", default=None,
+                    help="Pad naar de dataset (standaard: restaurant-sim-clean.json)")
+    cli = ap.parse_args()
+
+    data_path = _find_data(cli.data)
     print(f"Dataset: {data_path.name}")
     X, y, w, feat_len, meta_rows = load_data(data_path)
 

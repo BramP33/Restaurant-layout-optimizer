@@ -42,11 +42,15 @@ def main():
         else:
             i += 1
 
-    merged_path = ROOT / "restaurant-sim-merged.json"
+    # De schone set is sinds de her-collectie de canonieke dataset, en
+    # train_surrogate.py pakt hem ook als eerste. Naar restaurant-sim-merged
+    # schrijven en daarna trainen betekende dat deze lus zijn eigen nieuwe
+    # runs weggooide: hij vulde het ene bestand en trainde op het andere.
+    dataset_path = ROOT / "restaurant-sim-clean.json"
 
     if validated_path and validated_path.exists():
         print(f"Stap 1 — gevalideerde resultaten toevoegen: {validated_path}")
-        merged   = load_json(merged_path)
+        merged   = load_json(dataset_path)
         new_runs = load_json(validated_path)
 
         # Normaliseer: haal trainingRuns op als aanwezig (validate_headless.js formaat),
@@ -62,7 +66,7 @@ def main():
                     existing_seeds.add(seed)
                     added += 1
 
-        save_json(merged_path, merged)
+        save_json(dataset_path, merged)
         print(f"  {added} nieuwe runs toegevoegd (totaal: {len(merged)})")
     else:
         print("Geen gevalideerd bestand opgegeven — alleen hertraining en optimizer.")
@@ -76,14 +80,20 @@ def main():
         import torch  # noqa — check of PyTorch beschikbaar is
     except ImportError:
         train_script = HERE / "train_surrogate.py"
+    # Expliciet meegeven waar de lus zojuist naartoe geschreven heeft, zodat
+    # een wijziging in de zoekvolgorde van _find_data() dit nooit meer stil
+    # kan omleiden.
+    train_args = ([] if train_script.name == "train_gnn.py"
+                  else ["--data", str(dataset_path)])
     result = subprocess.run(
-        [sys.executable, str(train_script)],
+        [sys.executable, str(train_script), *train_args],
         cwd=HERE, capture_output=False
     )
     if result.returncode != 0:
         print("GNN trainingsfout, fallback naar RF…")
         result = subprocess.run(
-            [sys.executable, str(HERE / "train_surrogate.py")],
+            [sys.executable, str(HERE / "train_surrogate.py"),
+             "--data", str(dataset_path)],
             cwd=HERE, capture_output=False
         )
         if result.returncode != 0:

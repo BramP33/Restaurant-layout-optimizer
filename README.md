@@ -12,13 +12,23 @@ The simulator runs a full restaurant floor in the browser: guests arrive, get se
 
 The ML pipeline collects thousands of these simulation runs, trains a surrogate model on the layout data, and uses that model to search for better table arrangements — without running the expensive full simulation for every candidate.
 
-**Result: 31% reduction in waiter travel distance** (367k → 253k pixels), found through surrogate-guided optimization and confirmed via headless browser validation.
+**Result: ~9% reduction in waiter travel distance against the best of 10,240 randomly sampled
+layouts** — 320,577 px → 288,884 px, each measured over 30 seeds in a headless browser
+(95% CI on the difference: 8.4%–11.4%).
 
-> **Status: this number is being re-measured.** The optimizer turned out to be exploiting a
-> pathfinding fallback rather than finding a better floor plan — see
-> [Reward hacking](#reward-hacking-the-optimizer-found-a-bug-not-a-layout) below. The simulator has
-> been fixed and the dataset is being re-collected; the headline figure above still comes from the
-> old, exploited runs.
+Read that as a range rather than a point. An independent re-validation on a third, separate seed
+set put the same comparison at 7%, so the honest span is **7–11%**. The effect survives every
+split of the data; its exact size does not pin down to one decimal.
+
+> **This replaces an earlier claim of "31% reduction, 367k → 253k px".** That number came from a
+> layout that walled in the bar: every table was unreachable, and the optimizer was exploiting a
+> pathfinding fallback rather than finding a floor plan — see
+> [Reward hacking](#reward-hacking-the-optimizer-found-a-bug-not-a-layout). The simulator is fixed,
+> the dataset has been re-collected, and the figure above comes from the new data.
+>
+> Note the change of baseline. The old comparison ran against a mediocre greedy layout, which
+> flatters the result. The honest question is whether the optimizer beats *blind sampling*, so the
+> baseline above is the best layout out of 10,240 randomly generated valid ones.
 
 ---
 
@@ -60,10 +70,10 @@ score = (servedDrinks × 12) − (avgWait × 3) − (impatientGuests × 25) − 
 Browser sim (batch export)
         │
         ▼
-merge_datasets.py ──► restaurant-sim-merged.json (10,715 runs)
+merge_shards.py    ──► restaurant-sim-clean.json (30,720 runs)
         │
         ▼
-train_surrogate.py  ──► surrogate_model.pkl  (XGBoost, R²=0.678)
+train_surrogate.py  ──► surrogate_model.pkl  (GradientBoosting, R²=0.990)
 train_gnn.py        ──► gnn_model.pt         (GATv2, R²≈0.35–0.40)
         │
         ▼
@@ -80,12 +90,20 @@ evaluate.py        ──► reports the four headline metrics at any point
 
 ### Surrogate Model
 
-- **Algorithm**: XGBoost (best of RF / XGBoost / GradientBoosting comparison)
-- **Features**: 71 hand-crafted features — raw table positions, per-table distances to bar, corridor width estimates, cluster compactness
-- **Target**: `log(waiterDist)`, back-transformed to pixels on predict. Waiter distance spans 253k–1.3M px, so log space keeps the errors evenly weighted across that range
-- **Deduplication**: the 10,715 raw runs collapse to 4,272 unique layouts. `validate_headless.js` writes one record *per seed*, each carrying the batch's full seed list, so the same layout legitimately appears many times. Merging them into one row with a per-simulation weight is what keeps identical layouts out of train and test at the same time
+- **Algorithm**: GradientBoosting (best of RF / XGBoost / GradientBoosting comparison)
+- **Features**: 95 features — 71 hand-crafted (raw table positions, per-table Euclidean distances
+  to bar, corridor width estimates, cluster compactness) plus 24 A\* path features from
+  `pathgrid.py`. The Euclidean features cannot see that a table blocks a corridor; the path
+  features are a Dijkstra sweep from the bar dock over the simulator's own walking grid. They are
+  what the model actually runs on. The strongest individual features are the path distances to the
+  furthest-but-one tables (`sorted_paths[5]` and `[6]`, 0.54 combined) — a floor plan is priced by
+  its worst-placed tables. Next is the `seats × path distance` work proxy (0.30 combined across
+  `work.mean` and `work.sum`), a direct physical estimate of total waiter travel: waiters make
+  round trips per order, and orders scale with seats
+- **Target**: `log(waiterDist)`, back-transformed to pixels on predict. Waiter distance spans 316k–1.25M px, so log space keeps the errors evenly weighted across that range
+- **Deduplication**: the 30,720 raw runs collapse to 10,240 unique layouts, each run with 3 seeds. `validate_headless.js` writes one record *per seed*, each carrying the batch's full seed list, so the same layout legitimately appears many times. Merging them into one row with a per-simulation weight is what keeps identical layouts out of train and test at the same time
 - **Validation**: `GroupKFold` on the layout key. After deduplication every group holds exactly one row, so this is a safety net rather than a fix — the deduplication is what removes the leak
-- **Performance**: R² = 0.678, MAE = 60,787 px out-of-fold on 4,272 unique layouts
+- **Performance**: R² = 0.990, MAE = 12,896 px out-of-fold on 10,240 unique layouts
 
 ### Why R² is not the headline metric
 
@@ -93,16 +111,35 @@ Global R² is dominated by the gap between disastrous and mediocre layouts, whic
 
 | Metric | Meaning | Current |
 |---|---|---|
-| Validated top-1 | Best layout after real headless validation | 254,012 px (n=1) |
-| Calibration error | Mean (predicted − actual) on validated candidates | −0.1% (n=1) |
-| Spearman ρ, best decile | Ranking quality among the top 10% of layouts | 0.328 |
-| R² out-of-fold | Deduplicated, weighted per simulation, GroupKFold | 0.678 |
+| Validated top-1 | Best layout after real headless validation | 287,929 px (n=8, 15 seeds) |
+| Calibration error | Mean (predicted − actual) on validated candidates | −2.7% (n=8) |
+| Spearman ρ, best decile | Ranking quality among the top 10% of layouts | 0.513 |
+| R² out-of-fold | Deduplicated, weighted per simulation, GroupKFold | 0.990 |
 
-The gap between ρ = 0.85 overall and ρ = 0.33 within the best decile is the single most useful diagnostic in the pipeline: the model separates bad from good easily, but barely ranks the good ones. Simulator noise is not the limit — measured against the per-seed spread in the dataset, the ceiling sits near R² ≈ 0.99.
+The gap between ρ = 0.96 overall and ρ = 0.51 within the best decile is the single most useful
+diagnostic in the pipeline: the model separates bad from good easily, but ranks the good ones
+poorly. Two separate limits produce that gap, and only one of them is the model's fault.
 
-A second systematic effect matters more than the log transform: prediction bias runs from **+10% in the best decile to −21% in the worst**, plain regression to the mean. That is what makes the surrogate unreliable exactly where the optimizer searches.
+**Measurement noise caps it.** Within the best decile the *observed* spread between layouts is
+sd ≈ 10,100 px, but that already contains the measurement noise: the noise on a 3-seed mean is
+sd ≈ 7,600 px, leaving a true spread of only ≈ 6,700 px. Signal is smaller than noise, so even a
+perfect model would score only ρ ≈ 0.62–0.64 there. Reaching the target of 0.70 needs 5 seeds per
+layout, not 3 (ceiling ≈ 0.73); 9 seeds would allow ≈ 0.82. Collecting *more layouts* does nothing for this — measured across
+1,000 → 10,240 layouts, ρ in the best decile bounces between 0.14 and 0.28 with no trend.
 
-The first two metrics currently rest on a single validated layout, so treat them as placeholders until a proper validation round lands.
+**The remaining gap is the model's.** At 0.51 against a ceiling of 0.62 there is real room left,
+and the sharpest symptom is that the model cannot rank its own output: across the 8 validated
+candidates, predicted versus actual gives ρ = 0.10. The best layout it produced was the one it
+ranked fourth. Candidate *generation* is working; candidate *selection* is not, which is why the
+next step is optimizing a lower confidence bound (μ + κσ) rather than μ.
+
+For reference, the noise ceiling on global R² is 0.9966 for a 3-seed mean, so R² = 0.990 still
+leaves headroom.
+
+Prediction bias used to be the second systematic effect, running from **+10% in the best decile to
+−21% in the worst** — plain regression to the mean, which made the surrogate unreliable exactly
+where the optimizer searches. On the clean dataset with path features it is largely gone: the bias
+now runs from +2.5% in the best decile to −1.1% in the worst.
 
 ### GNN Model
 
@@ -122,11 +159,32 @@ Candidate layouts from the optimizer are validated by actually running the simul
 
 | Metric | Baseline (greedy) | Optimized |
 |---|---|---|
-| Waiter travel distance | ~367,532 px | ~253,102 px |
-| Improvement | — | **31.4%** |
-| Efficiency score | ~−3,800 | ~−3,007 |
+| Waiter travel distance | 320,577 px | **288,884 px** |
+| Improvement | — | **9.9%** (95% CI 8.4–11.4%, Welch p = 1.7e-18) |
+| Standard error | ±1,733 px | ±1,774 px |
 
-**Best layout pattern:** All 8 variable tables rotated 90°, concentrated toward the right side of the room (near the bar dock). 6 of 8 tables placed at x > 300, minimizing waiter round-trip distance to the bar.
+Both figures pool 30 seeds per layout from headless validation. The baseline is the best of the
+10,240 randomly sampled valid layouts in `restaurant-sim-clean.json`, re-validated at the same
+seed count so the two sides are measured identically.
+
+Two honest caveats on this number:
+
+**Winner's curse.** The optimized layout was picked as the best of 8 candidates using the same
+seeds it is scored on. Re-measured on fresh seeds it comes out 1,910 px higher — a real but small
+selection effect, already absorbed into the 30-seed pooled figure above. An independent reviewer
+re-ran the whole comparison on yet another seed set and landed at 7%; that is why the headline is
+stated as a range.
+
+**The model is not what is choosing well.** The *average* of the 8 optimizer candidates
+(326,020 px) is not significantly better than the baseline group (p = 0.41 against the top 3,
+p = 0.06 against the top 12). The win comes from one genuinely excellent layout in the pool, and
+the model ranked it fourth. Validation is doing the selecting, not the surrogate — which is the
+weakness described under [Why R² is not the headline metric](#why-r-is-not-the-headline-metric).
+
+One caveat worth stating plainly: the *average* of the 8 optimizer candidates (326,020 px) is not
+significantly better than the baseline group (335,863 px, p = 0.41). The win comes from one
+genuinely excellent layout in the pool, not from the model reliably steering toward good ones.
+Validation is doing the selecting, and that is exactly the weakness described above.
 
 ---
 
@@ -153,7 +211,16 @@ rather than better — a waiter with no route walks 0 px, which is cheaper still
 
 On the old dataset, 65% of layouts are invalid under this check — including all of the top 50.
 The cheapest *valid* layout runs 333,694 px against the 253,102 px of the best exploited one,
-which is why the whole dataset is being collected again.
+which is why the whole dataset was collected again. The re-collected set
+(`restaurant-sim-clean.json`) has 0 invalid layouts out of 10,240, because `collect_parallel.py`
+now sieves candidates through the same check before simulating them.
+
+The exploit had a second home. `optimize_layout.py` scored candidates without any reachability
+check, and the surrogate is trained only on valid layouts — so outside that region it extrapolates
+freely, and that is precisely where an optimizer goes looking. Four of its first five proposals
+walled in the bar again (one reachable cell out of 814). `_score_layouts()` now gates every
+candidate through `pathgrid.layout_valid()` before scoring, in both the random-search and the
+refinement phase.
 
 Two regression tests guard this:
 
@@ -199,8 +266,10 @@ cd ml
 # 1. Export training data from the browser (use the "Export batch" button),
 #    place the downloaded JSON files in the repository root
 
-# 2. Merge batch files
-python3 merge_datasets.py
+# 2. Merge the collected shards into restaurant-sim-clean.json
+python3 merge_shards.py
+#    (merge_datasets.py is the older path; it writes restaurant-sim-merged.json,
+#     which is the pre-fix dataset and is no longer what training reads)
 
 # 3. Train surrogate model
 python3 train_surrogate.py       # XGBoost/RF/GBT comparison, saves the best
@@ -228,7 +297,7 @@ bash ml/start_overnight.sh
 
 ```
 simulatie.html              # Full browser simulator (single file, no build step)
-best-layout.json            # Best layout found (253k px, confirmed)
+best-layout.json            # Best layout found (287,929 px, 15-seed validated)
 requirements.txt            # Python dependencies for the core pipeline
 ml/
 ├── optimize_layout.py      # Surrogate-guided layout search (500k candidates)

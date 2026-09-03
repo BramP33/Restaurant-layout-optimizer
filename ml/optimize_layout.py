@@ -15,6 +15,8 @@ import sys
 import time
 import numpy as np
 import joblib
+
+import pathgrid as pg
 from pathlib import Path
 
 HERE = Path(__file__).parent
@@ -171,13 +173,44 @@ def pad(rows, feat_len):
 # ── Scoring helper (duck-typed voor RF én GNN) ────────────────────────────────
 
 def _score_layouts(model, feat_len, layouts):
-    """Scoort layouts met RF of GNN — transparant voor de aanroeper."""
+    """
+    Scoort layouts met RF of GNN — transparant voor de aanroeper.
+
+    Onbereikbare indelingen krijgen inf en worden dus nooit gekozen.
+
+    Die poort is geen luxe. Het model is uitsluitend op geldige layouts
+    getraind — de zeef in collect_parallel hield de rest buiten de dataset —
+    dus buiten dat gebied voorspelt het niets zinnigs; het extrapoleert. En
+    laat dat nu precies zijn waar een optimizer op afgaat. Zonder poort levert
+    hij indelingen op die de bar inmetselen: een ober die nergens heen kan
+    legt nul afstand af, en dat is de goedkoopste layout die bestaat. Dezelfde
+    exploit als in de oude dataset, alleen een niveau hoger — niet in de data
+    maar in de zoekstap.
+
+    De toets staat bewust vóór de feature-extractie: hij wijst ongeveer de
+    helft van de kandidaten af (gemeten 49%), en die hoeven dan geen
+    Dijkstra-sweep meer. Beide stappen kosten een sweep over hetzelfde grid,
+    dus dat scheelt ruwweg een derde van de scoretijd.
+    """
     if feat_len is None:
         # GNNSurrogate: accepteert rauwe layout-lijsten
         return model.predict(layouts)
-    else:
-        # sklearn model: vereist feature-matrix
-        return model.predict(pad([extract_features(l) for l in layouts], feat_len))
+
+    scores    = np.full(len(layouts), np.inf, dtype=float)
+    keep, rows = [], []
+    for i, layout in enumerate(layouts):
+        # Toets de wereld die de simulator daadwerkelijk opbouwt: alleen de
+        # variabele tafels. De custom tafels in de kandidaatlijst zijn inerte
+        # metadata en staan niet op de vloer (zie pathgrid.py). Ze wel
+        # meerekenen zou indelingen afkeuren die in de simulatie prima lopen.
+        var = [t for t in layout if t.get("size") != "custom"]
+        ok, _unreachable, _trapped = pg.layout_valid(pg.build_blocked(var), var)
+        if ok:
+            keep.append(i)
+            rows.append(extract_features(layout))
+    if keep:
+        scores[keep] = model.predict(pad(rows, feat_len))
+    return scores
 
 
 # ── Random search ─────────────────────────────────────────────────────────────
@@ -187,7 +220,7 @@ def random_search(model, feat_len, n_candidates, rng, batch=50_000):
     t0 = time.time()
 
     all_layouts, all_scores = [], []
-    generated = 0
+    generated = rejected = 0
 
     while generated < n_candidates:
         size             = min(batch, n_candidates - generated)
@@ -197,11 +230,15 @@ def random_search(model, feat_len, n_candidates, rng, batch=50_000):
         if not layouts:
             continue
 
-        scores = _score_layouts(model, feat_len, layouts)
-        all_layouts.extend(layouts)
-        all_scores.extend(scores)
-        print(f"  {generated:>7,} geprobeerd — {len(all_layouts):,} geldig "
-              f"({hit*100:.0f}% hit) — beste dist: {min(all_scores):,.0f}")
+        scores    = _score_layouts(model, feat_len, layouts)
+        keep      = [i for i, sc in enumerate(scores) if np.isfinite(sc)]
+        rejected += len(layouts) - len(keep)
+        all_layouts.extend(layouts[i] for i in keep)
+        all_scores.extend(float(scores[i]) for i in keep)
+        best = min(all_scores) if all_scores else float("inf")
+        print(f"  {generated:>7,} geprobeerd — {len(all_layouts):,} bereikbaar "
+              f"({hit*100:.0f}% plaatsbaar, {rejected:,} onbereikbaar afgewezen) "
+              f"— beste dist: {best:,.0f}")
 
     order          = np.argsort(all_scores)
     sorted_layouts = [all_layouts[i] for i in order]

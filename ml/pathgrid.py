@@ -336,3 +336,109 @@ def table_access(blocked, dist, t):
         if d < best_path:
             best_path, best_pt = d, p
     return best_path, best_pt
+
+
+# ── Features voor de surrogate ───────────────────────────────────────────────
+
+# LET OP -- de drie "custom" tafels in de datasetrecords zijn GEEN obstakels.
+#
+# Elk record draagt een `tables`-veld met 11 tafels, waarvan 3 custom. Het is
+# verleidelijk die als vast meubilair in het grid te zetten, maar de simulatie
+# die het target heeft gemeten kende ze niet:
+#
+#   - validate_headless.js:42 filtert custom weg en stuurt alleen de variabele
+#     tafels als `forcedLayout` de pagina in;
+#   - config.forcedLayout bevat in alle 30.720 runs precies 8 tafels en 0 custom;
+#   - simulatie.html:1375 plaatst custom tafels uitsluitend uit
+#     `engine.drawnTables`, en die wordt alleen uit localStorage gevuld
+#     (simulatie.html:2791). Een verse headless browser heeft die niet.
+#
+# Het `tables`-veld is dus inerte metadata die collect_parallel meekopieert.
+# Ze toch in het grid zetten meet een andere vloer dan waar het target vandaan
+# komt: het sluit doorgangen af die in de simulatie openstaan.
+N_PATH_FEATURES = 24
+
+
+def path_features(variable, fixed=()):
+    """
+    Padgebaseerde features uit een enkele Dijkstra-sweep vanaf de bardock.
+
+    De bestaande features zijn Euclidisch terwijl het target een A*-padlengte
+    is. Een tafel die een doorgang dichtzet ziet er hemelsbreed onschuldig uit
+    en verdubbelt intussen de looproute -- dat verschil is precies wat hier
+    gemeten wordt.
+
+    De sterkste term is niet de afstand zelf maar `sum(seats * padafstand)`:
+    obers lopen heen en weer per bestelling, en het aantal bestellingen aan een
+    tafel schaalt met het aantal stoelen. Dat product is dus een directe
+    natuurkundige schatting van de totale looplengte.
+
+    Geeft altijd exact N_PATH_FEATURES waarden terug, ook als de layout
+    onbereikbaar is -- de lengte van de featurevector moet vast liggen.
+    """
+    # `fixed` is standaard leeg: de simulator plaatst alleen de variabele
+    # tafels (zie de toelichting bovenaan deze sectie). Alleen wie een sessie
+    # met getekende tafels naspeelt, geeft hier iets mee.
+    tables = list(fixed) + list(variable)
+
+    blocked = build_blocked(tables)
+    dist    = distance_field(blocked, BAR_DOCK)
+
+    free      = ~blocked
+    reachable = np.isfinite(dist) & free
+
+    paths, euclids, seats = [], [], []
+    for t in variable:
+        p, pt = table_access(blocked, dist, t)
+        tn = normalise_table(t)
+        cx, cy = tn["x"] + tn["w"] / 2, tn["y"] + tn["h"] / 2
+        e = math.hypot(cx - BAR_DOCK[0], cy - BAR_DOCK[1])
+        paths.append(p)
+        euclids.append(e)
+        seats.append(float(tn.get("seats", 4)))
+
+    paths   = np.array(paths, dtype=float)
+    euclids = np.array(euclids, dtype=float)
+    seats   = np.array(seats, dtype=float)
+
+    n_unreachable = int(np.isinf(paths).sum())
+    # Onbereikbare tafels krijgen een eindige strafwaarde: inf maakt elke
+    # afgeleide statistiek inf en het model kan er niets mee. De zeef in
+    # collect_parallel houdt deze layouts sowieso buiten de trainingsdata,
+    # maar de optimizer voert ze wel aan het model.
+    # De straf moet boven ELKE echte padafstand liggen. `max(eindig) * 2` is
+    # dat niet: in een krappe indeling loopt een bereikbare tafel tot ~1.800 px
+    # terwijl een ruime layout op ~600 px zit, dus daar zou een afgesloten
+    # tafel goedkoper uitvallen dan een ver-maar-bereikbare. Dat is precies de
+    # vorm van de exploit die we dichttimmeren, nu in de featureruimte.
+    penalty = 10.0 * ROOM_W          # 6.400 px, ruim boven de langste route
+    paths = np.where(np.isinf(paths), penalty, paths)
+
+    detour = paths / np.maximum(euclids, 1.0)
+    work   = seats * paths          # de proxy voor totale looplengte
+
+    sorted_paths = np.sort(paths)
+    if sorted_paths.size < 8:       # vaste lengte afdwingen
+        sorted_paths = np.pad(sorted_paths, (0, 8 - sorted_paths.size),
+                              constant_values=sorted_paths[-1] if sorted_paths.size else 0.0)
+    else:
+        sorted_paths = sorted_paths[:8]
+
+    floor_d = dist[reachable]
+
+    return [
+        # Padafstand tot de bar
+        float(paths.mean()), float(paths.min()), float(paths.max()),
+        float(paths.std()),  float(paths.sum()),
+        *[float(v) for v in sorted_paths],                 # 8
+        # Omweg ten opzichte van hemelsbreed: hoeveel blokkeert de indeling?
+        float(detour.mean()), float(detour.max()),
+        float(detour.std()),  float(detour.min()),
+        # Werk-proxy: stoelen maal padafstand
+        float(work.sum()), float(work.mean()), float(work.max()),
+        # Hoe open is de vloer, en hoe ver ligt hij gemiddeld van de bar?
+        float(reachable.sum()),
+        float(floor_d.mean()) if floor_d.size else 0.0,
+        float(np.percentile(floor_d, 90)) if floor_d.size else 0.0,
+        float(n_unreachable),
+    ]

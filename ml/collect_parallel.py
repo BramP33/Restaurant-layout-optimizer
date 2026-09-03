@@ -68,7 +68,15 @@ def generate_batch_file(n, out_path, rng_seed):
             # Zeef vooraf: een indeling waarin een ober opgesloten staat of een
             # tafel onbereikbaar is, hoeft niet gesimuleerd te worden. De
             # uitkomst zou toch weggegooid worden door merge_shards.
-            valid, _unreach, _trapped = pg.layout_valid(pg.build_blocked(layout), layout)
+            #
+            # Toets de wereld die de simulator opbouwt: alleen de variabele
+            # tafels. De custom tafels die generate_batch meelevert komen nooit
+            # op de vloer terecht (validate_headless.js stuurt ze niet mee, en
+            # simulatie.html plaatst ze alleen uit localStorage) -- zie de
+            # toelichting in pathgrid.py. Ze toch als obstakel meerekenen keurt
+            # indelingen af die in de simulatie prima lopen.
+            var = [t for t in layout if t.get("size") != "custom"]
+            valid, _unreach, _trapped = pg.layout_valid(pg.build_blocked(var), var)
             if valid:
                 layouts.append(layout)
             else:
