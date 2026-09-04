@@ -99,10 +99,11 @@ def generate_batch(N, rng, max_tries=200):
     _bx, _by, _bw, _bh = pg.BUFFET_RECT
     placed = [(np.full(N, _bx - 8, np.float32), np.full(N, _by - 8, np.float32),
                np.full(N, _bw + 8 + WALKWAY_PX, np.float32), np.full(N, _bh + 16, np.float32))]
-    for ft in FIXED_TABLES:
-        fx, fy, fw, fh = _aabb_scalar(ft["x"], ft["y"], ft["w"], ft["h"], ft["rotation"])
-        placed.append((np.full(N, fx, np.float32), np.full(N, fy, np.float32),
-                       np.full(N, fw, np.float32), np.full(N, fh, np.float32)))
+    # FIXED_TABLES staan hier bewust NIET meer bij. Die drie "custom" tafels
+    # komen nooit op de vloer -- validate_headless.js filtert ze weg en
+    # simulatie.html plaatst ze alleen uit localStorage -- dus ze mijden was
+    # het ontwijken van meubilair dat niet bestaat. Het sloot ongeveer 46% van
+    # de plaatsingsruimte af zonder enige reden.
 
     result_xs = np.zeros((N, T), np.float32)
     result_ys = np.zeros((N, T), np.float32)
@@ -117,11 +118,11 @@ def generate_batch(N, rng, max_tries=200):
 
         x_hi   = (ROOM_W - WALL_MARGIN) - ew_arr   # bovengrens x
         y_hi   = (ROOM_H - WALL_MARGIN) - eh_arr
-        # Bias: 60% van layouts op rechterkant (x ≥ 250) — dichter bij bar
-        x_lo_default = float(WALL_MARGIN)
-        x_lo_biased  = 250.0
-        bias_mask = (rng.random(N) < 0.60).astype(np.float32)
-        x_lo = np.where(bias_mask, x_lo_biased, x_lo_default).astype(np.float32)
+        # Geen rechterkant-bias meer. Die stond op 60% en bakte een eerdere
+        # conclusie in: als de sampler zelden links kijkt, wordt een beter
+        # optimum links per definitie nooit gevonden, en elke dataset die
+        # eruit rolt bevestigt de aanname waarmee hij gemaakt is.
+        x_lo = np.full(N, float(WALL_MARGIN), np.float32)
         y_lo   = np.full(N, float(WALL_MARGIN), np.float32)
 
         accepted = np.zeros(N, dtype=bool)
