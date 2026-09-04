@@ -13,14 +13,16 @@ The simulator runs a full restaurant floor in the browser: guests arrive, get se
 The ML pipeline collects thousands of these simulation runs, trains a surrogate model on the layout data, and uses that model to search for better table arrangements — without running the expensive full simulation for every candidate.
 
 **Result: ~15% reduction in waiter travel distance against the best of 10,240 randomly sampled
-layouts** — 320,577 px → 270,685 px, each measured over 30 seeds in a headless browser
-(15.6%, 95% CI 14.1%–17.0%).
+layouts** — 318,208 px → 270,685 px, each measured over 30 seeds in a headless browser
+(14.9%, 95% CI 13.2%–16.7%).
 
-Read it as a range. The baseline has been measured on three independent 15-seed sets at
-315,920 / 319,729 / 321,426 px; taking the low end puts the gain at 14.3%, so **~14–17%** is the
-honest span. The winning layout was also re-validated on 15 fresh seeds after being selected — it
-comes out 5,186 px higher there, and that selection effect is already absorbed into the pooled
-figure above.
+Both numbers are in the repository: `baseline-layout.json` and `best-layout.json` carry their 30
+per-seed measurements, so the figure can be recomputed rather than taken on trust. The baseline has
+now been measured on four independent seed sets — 315,920 / 318,208 / 319,729 / 321,426 px — which
+puts the gain between 14.3% and 15.8% depending on which one you use.
+
+The winning layout was re-validated on 15 fresh seeds after being selected: it comes out 5,186 px
+higher there, and that selection effect is already absorbed into the pooled figure.
 
 > **This replaces an earlier claim of "31% reduction, 367k → 253k px".** That number came from a
 > layout that walled in the bar: every table was unreachable, and the optimizer was exploiting a
@@ -107,7 +109,7 @@ evaluate.py        ──► reports the four headline metrics at any point
 - **Deduplication**: the 30,720 raw runs collapse to 10,240 unique layouts, each run with 3 seeds. `validate_headless.js` writes one record *per seed*, each carrying the batch's full seed list, so the same layout legitimately appears many times. Merging them into one row with a per-simulation weight is what keeps identical layouts out of train and test at the same time
 - **Validation**: `GroupKFold` on the layout key. After deduplication every group holds exactly one row, so this is a safety net rather than a fix — the deduplication is what removes the leak
 - **Performance**: R² = 0.990, MAE = 12,896 px out-of-fold on 10,240 unique layouts. A second
-  model adds the 14 tour features (109 total) and reaches R² = 0.991, MAE = 12,051 px; the
+  model adds the 14 tour features (109 total) and reaches R² = 0.9904, MAE = 12,166 px; the
   optimizer uses the cheap one to search and the frontier one to refine
 
 ### Why R² is not the headline metric
@@ -116,16 +118,16 @@ Global R² is dominated by the gap between disastrous and mediocre layouts, whic
 
 | Metric | Meaning | Current |
 |---|---|---|
-| Validated top-1 | Best layout after real headless validation | 268,092 px (n=8, 15 seeds) |
+| Validated top-1 | Best layout after real headless validation | 270,685 px (30 seeds; 268,092 on the 15 selection seeds alone) |
 | Calibration error | Mean (predicted − actual), scored by the model that did *not* select | +8.0% (n=8) |
+| Spearman ρ, best decile | Ranking quality among the top 10% of layouts | 0.513 |
+| R² out-of-fold | Deduplicated, weighted per simulation, GroupKFold | 0.990 |
 
 Note on that calibration figure: the optimizer's final candidates are chosen by the frontier model
 as its own lowest predictions, so scoring them with that same model flatters it — the winner's
 curse lives in the prediction, not just the outcome. It reports +1.4%; the base model, which did
 not make the selection, reports +8.0%. The honest number is the one from the model that had no
 hand in choosing, and it does not meet the < 3% goal.
-| Spearman ρ, best decile | Ranking quality among the top 10% of layouts | 0.513 |
-| R² out-of-fold | Deduplicated, weighted per simulation, GroupKFold | 0.990 |
 
 The gap between ρ = 0.96 overall and ρ = 0.51 within the best decile is the single most useful
 diagnostic in the pipeline: the model separates bad from good easily, but ranks the good ones
@@ -180,18 +182,22 @@ Fourteen tour features fix that — table-to-table *path* distances, a greedy to
 and mismatch ratios (path ÷ Euclidean per pair) that measure exactly where the simulator's chaining
 heuristic trips over its own geometry.
 
-Measured against a held-out seed, over 3 CV splits × 3 held-out seeds:
+Measured against a held-out seed, 18 paired measurements (6 CV splits × 3 held-out seeds), each
+comparing the two feature sets on the *same* split and seed:
 
-| feature set | ρ inside the model's decile | mean of its best 8 |
-|---|---|---|
-| base (95) | 0.447 ± 0.013 | 340,580 px |
-| + tour (109) | **0.486 ± 0.022** | **335,599 px** |
-| + 15 random noise columns (control) | 0.451 ± 0.012 | 339,718 px |
+| | base (95) | + tour (109) | paired difference |
+|---|---|---|---|
+| ρ inside the model's decile | 0.451 | **0.483** | **+0.031**, 95% CI [+0.023, +0.040], 18/18 |
+| mean of its best 8 | 340,389 px | **336,993 px** | **−3,396 px**, 95% CI [−4,376, −2,415], 16/18 |
 
-Paired per measurement that is **Δρ = +0.039 ± 0.019, positive in 9 of 9**, against +0.004 for the
-noise control — so it is the features, not simply having more columns. The best-8 mean, the metric
-that actually matters to the optimizer, improves by 4,981 px. GradientBoosting, the model that
-ships, agrees: ρ 0.455 → 0.493, best-8 340,635 → 336,926 px. Out-of-fold R² goes 0.990 → 0.9904.
+Both p < 0.0001. A control run with 15 random noise columns instead of the tour features moves ρ by
++0.004, so this is the features rather than simply having more columns. GradientBoosting, the model
+that ships, agrees: ρ 0.455 → 0.493. Out-of-fold R² goes 0.990 → 0.9904.
+
+The pairing matters. An independent reviewer measured the best-8 effect unpaired and found nothing
+(+1,239 ± 6,419 px, p = 0.58); the run-to-run spread swamps a 3,400 px effect unless the same split
+and seed are compared on both sides. An earlier version of this section also quoted −4,981 px from
+9 measurements, which was on the generous end of the range.
 
 Two things were tried here and dropped. Ordering the greedy tour the way the simulator actually
 orders its trips (Euclidean from the bar, then walked with A\*) is more faithful but adds nothing
@@ -261,9 +267,15 @@ Candidate layouts from the optimizer are validated by actually running the simul
 
 | Metric | Baseline (greedy) | Optimized |
 |---|---|---|
-| Waiter travel distance | 320,577 px | **270,685 px** |
-| Improvement | — | **15.6%** (95% CI 14.1–17.0%; ~14–17% across baseline seed sets) |
-| Standard error | ±1,733 px | ±1,633 px |
+| Waiter travel distance | 318,208 px | **270,685 px** |
+| Improvement | — | **14.9%** (95% CI 13.2–16.7%; 14.3–15.8% across four baseline seed sets) |
+| Standard error | ±2,269 px | ±1,633 px |
+
+This compares *this layout* against *that layout*, each over 30 seeds. It is not a measurement of
+how reliably the search finds such a layout: each figure comes from a single optimizer run, and
+runs vary in pool quality. The controlled evidence that the tour features help is the held-out-seed
+table under [Why R² is not the headline metric](#why-r-is-not-the-headline-metric), not the
+movement of this headline between commits.
 
 Both figures pool 30 seeds per layout from headless validation. The baseline is the best of the
 10,240 randomly sampled valid layouts in `restaurant-sim-clean.json`, re-validated at the same
@@ -281,7 +293,9 @@ pool improving — but n = 8 against n = 8 gives Welch p = 0.115 with a 95% inte
 significant" to "significant". Two optimizer runs with one draw each cannot settle it; the
 controlled evidence for the features is the held-out-seed table above, not this comparison.
 
-The model still cannot fine-rank its own output (ρ = 0.02 across the 8), so the last step is still
+The model cannot be relied on to fine-rank its own output — across the eight candidates of three
+successive runs it scored ρ = 0.02, 0.05 and 0.60, which at n = 8 is a coin toss (the 0.60 has
+p = 0.12). So the last step is still
 brute force: validate a handful and keep the best. The 6.8% oracle gap below is the standing price
 of that.
 
