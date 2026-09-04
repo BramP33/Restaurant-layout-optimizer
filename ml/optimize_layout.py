@@ -87,8 +87,18 @@ def generate_batch(N, rng, max_tries=200):
     T     = len(VARIABLE_TYPES)
     rot90 = rng.integers(0, 2, N).astype(bool)   # (N,) één rotatie per layout
 
-    # Vaste tafels als placed-lijst (zelfde AABB voor elk van de N layouts)
-    placed = []
+    # De buffetlijn plus een looppad aan de zaalkant: daar past geen tafel.
+    # Zonder dit blok stelt de optimizer indelingen voor met een tafel midden
+    # in het buffet -- geldig volgens de bereikbaarheidstoets, onzin in het
+    # echt.
+    # Looppad aan de zaalkant van het buffet. In deze zaal is ~20 px ongeveer
+    # een meter (een tafel voor vier is 80 px breed), dus 36 px ~ 1,8 m -- ruim
+    # genoeg om langs een wachtende rij te lopen, en de vuistregel uit de
+    # cateringpraktijk is minimaal ~1,2 m.
+    WALKWAY_PX = 36
+    _bx, _by, _bw, _bh = pg.BUFFET_RECT
+    placed = [(np.full(N, _bx - 8, np.float32), np.full(N, _by - 8, np.float32),
+               np.full(N, _bw + 8 + WALKWAY_PX, np.float32), np.full(N, _bh + 16, np.float32))]
     for ft in FIXED_TABLES:
         fx, fy, fw, fh = _aabb_scalar(ft["x"], ft["y"], ft["w"], ft["h"], ft["rotation"])
         placed.append((np.full(N, fx, np.float32), np.full(N, fy, np.float32),
@@ -206,6 +216,8 @@ def _score_layouts(model, feat_len, layouts, frontier=False):
         # meerekenen zou indelingen afkeuren die in de simulatie prima lopen.
         var = [t for t in layout if t.get("size") != "custom"]
         ok, _unreachable, _trapped = pg.layout_valid(pg.build_blocked(var), var)
+        if ok and pg.overlaps_buffet(var):
+            ok = False          # bereikbaar maar fysiek onmogelijk
         if ok:
             keep.append(i)
             rows.append(extract_features(layout, frontier=frontier))

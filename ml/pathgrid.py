@@ -33,6 +33,11 @@ CELL     = 18
 ROOM_W   = 640
 ROOM_H   = 640
 BAR_RECT = (ROOM_W - 90, 50, 70, ROOM_H - 100)
+# Buffetlijn tegen de linkerwand -- moet exact overeenkomen met makeBuffet()
+# in simulatie.html, anders meet de spiegel een andere vloer dan de simulator.
+# Alleen aanwezig bij party-types met hasBuffet; de hele pipeline draait op
+# "buffet", dus hier staat hij vast aan.
+BUFFET_RECT = (20, 170, 60, max(160, ROOM_H - 340))
 BAR_DOCK = (ROOM_W - 110, 80)          # simulatie.html:1153 — NIET het midden van de bar
 ENTRANCE = (48, ROOM_H - 54)           # simulatie.html:1145
 
@@ -122,6 +127,9 @@ def build_blocked(tables):
 
     bx, by, bw, bh = BAR_RECT
     add(bx - 4, by - 4, bw + 8, bh + 8)
+
+    fx, fy, fw, fh = BUFFET_RECT
+    add(fx - 4, fy - 4, fw + 8, fh + 8)
     return blocked
 
 
@@ -357,6 +365,25 @@ def table_access(blocked, dist, t):
 # Ze toch in het grid zetten meet een andere vloer dan waar het target vandaan
 # komt: het sluit doorgangen af die in de simulatie openstaan.
 N_PATH_FEATURES = 24
+
+
+def overlaps_buffet(tables):
+    """
+    Staat er een tafel in de buffetlijn?
+
+    layout_valid() vangt dit NIET: die toetst bereikbaarheid, en een tafel die
+    half in het buffet staat blijft prima bereikbaar. Fysiek is het onzin, dus
+    de optimizer moet er apart op filteren -- precies het soort gat waar de
+    zoektocht eerder in kroop.
+    """
+    fx, fy, fw, fh = BUFFET_RECT
+    for t in tables:
+        if t.get("size") == "custom":
+            continue
+        ax, ay, aw, ah = table_aabb(normalise_table(t))
+        if ax < fx + fw and ax + aw > fx and ay < fy + fh and ay + ah > fy:
+            return True
+    return False
 
 
 def path_features(variable, fixed=()):

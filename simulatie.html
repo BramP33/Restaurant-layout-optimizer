@@ -372,6 +372,7 @@
       <div class="item"><span class="dot" style="background:#7cc3ff"></span>Drinking</div>
       <div class="item"><span class="dot" style="background:#c084fc"></span>Socializing</div>
       <div class="item"><span class="dot" style="background:#a0a0a0"></span>Toilet / walking</div>
+      <div class="item"><span class="dot" style="background:#f59f4a"></span>Buffet</div>
       <div class="item"><span class="sq"  style="background:#f5a623"></span>Waiter (one color each)</div>
     </div>
 
@@ -458,6 +459,42 @@
 // -----------------------------------------------------------------------
 //  Party type configuration
 // -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
+//  Buffetlijn
+// -----------------------------------------------------------------------
+//  Tegen de linkerwand, als tegenhanger van de bar rechts. Die keuze is op
+//  zaalindeling gemaakt en niet op de huidige beste layout: gasten lopen zo
+//  van hun tafel naar links terwijl de obers naar rechts naar de bar lopen,
+//  en juist dat kruisende verkeer is wat een buffet aan het probleem
+//  toevoegt. Enkelzijdig, want tegen een wand kun je maar van één kant
+//  aanschuiven -- voor 49 gasten is dat ruim voldoende (de vuistregel is een
+//  dubbelzijdige lijn per 100-120 gasten).
+//
+//  Maatvoering en gedrag komen uit onderzoek/gastgedrag-buffetten-en-feesten.md
+//  plus doorvoercijfers uit de cateringpraktijk: 30-50 gasten per uur per
+//  station (~72-120 s per gast), piek 30-45 min na aanvang, 1,3-1,5 passes per
+//  gast waarvan 30-40% een tweede ronde.
+function makeBuffet(config) {
+  if (!(PARTY_TYPES[config.partyType] || {}).hasBuffet) return null;
+  const h = Math.max(160, config.roomH - 340);
+  return {
+    x: 20, y: 170, w: 60, h,
+    slots: 3,                       // hoeveel gasten zich tegelijk kunnen opscheppen
+    dwellRange: [45, 90],           // seconden aan de lijn, uit de doorvoercijfers
+  };
+}
+
+// De aanlooppunten liggen op de zaalkant (rechts van de lijn), niet ertegenaan:
+// een punt binnen het obstakel is onbereikbaar voor de router.
+function buffetSlotPoints(buffet) {
+  const pts = [];
+  for (let i = 0; i < buffet.slots; i++) {
+    const frac = (i + 0.5) / buffet.slots;
+    pts.push({ x: buffet.x + buffet.w + 26, y: buffet.y + frac * buffet.h });
+  }
+  return pts;
+}
+
 const PARTY_TYPES = {
   // Drankaantallen volgen onderzoek/gastgedrag-buffetten-en-feesten.md:
   // ~1-1,5 drankjes per gast per uur met een piek in het eerste uur, en dat
@@ -472,6 +509,7 @@ const PARTY_TYPES = {
     perHourDrinksRange: [1, 1.5],
     toiletVisitsAvg: 1.5,
     socializeChance: 0.35,
+    hasBuffet: false,
   },
   buffet: {
     label: "Warm-koud buffet",
@@ -481,6 +519,7 @@ const PARTY_TYPES = {
     perHourDrinksRange: [1, 1.5],
     toiletVisitsAvg: 2.5,
     socializeChance: 0.18,
+    hasBuffet: true,
   },
   feestavond: {
     label: "Feestavond",
@@ -490,6 +529,7 @@ const PARTY_TYPES = {
     perHourDrinksRange: [1, 1.5],
     toiletVisitsAvg: 3,
     socializeChance: 0.30,
+    hasBuffet: true,
   },
 };
 
@@ -596,7 +636,7 @@ function rectOverlap(a, b, pad = 0) {
 //  A* gives the simulation a better physical model without adding any
 //  external library or turning the demo into a full game engine.
 class PathNavigator {
-  constructor(width, height, tables, bar, userObstacles = []) {
+  constructor(width, height, tables, bar, userObstacles = [], buffet = null) {
     this.width = width;
     this.height = height;
     this.cell = 18;                         // coarse enough for speed, fine enough for corridors
@@ -606,7 +646,7 @@ class PathNavigator {
     this.obstacles = [];
     this.pathFailures = 0;              // routes die onmogelijk bleken
     this._components  = null;           // lazy componentlabels (zie components())
-    this._buildObstacles(tables, bar, userObstacles);
+    this._buildObstacles(tables, bar, userObstacles, buffet);
     this._rasterize();
   }
 
@@ -615,7 +655,7 @@ class PathNavigator {
   // but its dock point remains outside the blocked area so waiters and
   // impatient guests can still queue beside it. User-placed obstacles are
   // treated like furniture: agents must route around them.
-  _buildObstacles(tables, bar, userObstacles) {
+  _buildObstacles(tables, bar, userObstacles, buffet) {
     for (const t of tables) {
       const r = t.rect(); // AABB accounts for rotation
       this.obstacles.push({ x: r.x - 8, y: r.y - 8, w: r.w + 16, h: r.h + 16, kind: "table" });
@@ -624,6 +664,10 @@ class PathNavigator {
       }
     }
     this.obstacles.push({ x: bar.x - 4, y: bar.y - 4, w: bar.w + 8, h: bar.h + 8, kind: "bar" });
+    if (buffet) {
+      this.obstacles.push({ x: buffet.x - 4, y: buffet.y - 4,
+                            w: buffet.w + 8, h: buffet.h + 8, kind: "buffet" });
+    }
     for (const o of userObstacles) {
       this.obstacles.push({ x: o.x - 4, y: o.y - 4, w: o.w + 8, h: o.h + 8, kind: "obstacle" });
     }
@@ -634,14 +678,28 @@ class PathNavigator {
   // obstacle. This is conservative and keeps the walking lanes visibly
   // clear even when agents have a non-zero radius.
   _rasterize() {
+    // `solid` is een strengere deelverzameling van `blocked`: alles behalve
+    // stoelen. Een gast hoort op een stoel te STAAN, maar nooit in een tafel,
+    // de bar of de buffetlijn. Dat onderscheid maakt de clipping-controle
+    // hieronder pas zinvol.
+    this.solid = new Set();
     for (let y = 0; y < this.rows; y++) {
       for (let x = 0; x < this.cols; x++) {
         const p = this.cellToPoint(x, y);
-        if (this.obstacles.some(o => p.x >= o.x && p.x <= o.x + o.w && p.y >= o.y && p.y <= o.y + o.h)) {
+        const hit = this.obstacles.filter(o =>
+          p.x >= o.x && p.x <= o.x + o.w && p.y >= o.y && p.y <= o.y + o.h);
+        if (hit.length) {
           this.blocked.add(this.key(x, y));
+          if (hit.some(o => o.kind !== "chair")) this.solid.add(this.key(x, y));
         }
       }
     }
+  }
+
+  // Staat dit punt in meubilair waar niemand doorheen mag?
+  isSolid(p) {
+    const c = this.pointToCell(p);
+    return this.solid.has(this.key(c.x, c.y));
   }
 
   key(x, y) { return x + "," + y; }
@@ -1064,6 +1122,9 @@ class Guest {
     this.arrivalSimTime = 0;             // sim time when guest arrived
     this.exitScheduled = false;          // has exit been scheduled?
     this.savedState = null;              // state before toilet/excursion
+    this.plannedBuffetTimes = [];        // geplande buffetbezoeken
+    this.buffetSlot = null;              // bezette plek aan de lijn
+    this.buffetArrivedAt = -1;           // sim-tijd van aankomst bij de rij
   }
 
   // Mood colour for the current state. Encodes the state in a single
@@ -1071,6 +1132,8 @@ class Guest {
   colour() {
     switch (this.state) {
       case "SEATED":      return "#6ad17a";
+      case "BUFFET":
+      case "BUFFET_WALK": return "#f59f4a";
       case "WAITING":     return "#f1c14a";
       case "BAR":         return "#ef5454";
       case "DRINKING":    return "#7cc3ff";
@@ -1227,6 +1290,8 @@ class SimulationEngine {
       totalServed: 0, totalLeft: 0, impatient: 0,
       waitSum: 0, waitSamples: 0, waiterDist: 0, score: 0,
       waiterPathFailures: 0, guestPathFailures: 0,
+      buffetVisits: 0, buffetQueueSum: 0, buffetQueueSamples: 0,
+      clipEvents: 0,
     };
 
     // Bind the loop once so we keep a stable function identity for the
@@ -1278,6 +1343,8 @@ class SimulationEngine {
       totalServed: 0, totalLeft: 0, impatient: 0,
       waitSum: 0, waitSamples: 0, waiterDist: 0, score: 0,
       waiterPathFailures: 0, guestPathFailures: 0,
+      buffetVisits: 0, buffetQueueSum: 0, buffetQueueSamples: 0,
+      clipEvents: 0,
     };
     this.spawnQueue = [];               // pre-baked guest spawn schedule
 
@@ -1291,6 +1358,8 @@ class SimulationEngine {
       w: 70, h: config.roomH - 100,
       dock: { x: config.roomW - 110, y: 80 },
     };
+    this.buffet = makeBuffet(config);
+    this.buffetBusy = this.buffet ? new Array(this.buffet.slots).fill(null) : [];
 
     // Generate a layout. Retry up to 5 times — the random sampler can
     // fail one attempt even when valid positions exist.
@@ -1310,7 +1379,7 @@ class SimulationEngine {
     // regenerated every run because a new table layout means a new blocked
     // grid. Both guests and waiters use this same map, which keeps their
     // movement constraints consistent.
-    this.navigator = new PathNavigator(config.roomW, config.roomH, this.tables, this.bar, this.obstacles);
+    this.navigator = new PathNavigator(config.roomW, config.roomH, this.tables, this.bar, this.obstacles, this.buffet);
     this._layoutReachCache = null;   // nieuwe layout -> bereikbaarheid opnieuw bepalen
 
     // Spawn waiters at the bar dock with distinct colours.
@@ -1423,6 +1492,12 @@ class SimulationEngine {
       { x: roomW - 100, y: 30, w: 100, h: roomH - 60 },
       ...this.obstacles.map(o => ({ x: o.x, y: o.y, w: o.w, h: o.h })),
     ];
+    // De buffetlijn plus een looppad aan de zaalkant: daar mag geen tafel
+    // staan, anders is de rij niet te bereiken.
+    if (this.buffet) {
+      const bf = this.buffet;
+      forbidden.push({ x: bf.x - 8, y: bf.y - 8, w: bf.w + 8 + 60, h: bf.h + 16 });
+    }
 
     for (const size of declare) {
       // Probe table at origin — compute AABB to derive valid placement bounds.
@@ -1615,6 +1690,10 @@ class SimulationEngine {
         pathFailures:      this.navigator ? this.navigator.pathFailures : 0,
         waiterPathFailures: this.metrics.waiterPathFailures || 0,
         guestPathFailures:  this.metrics.guestPathFailures  || 0,
+        buffetVisits:       this.metrics.buffetVisits       || 0,
+        buffetQueueSum:     this.metrics.buffetQueueSum     || 0,
+        buffetQueueSamples: this.metrics.buffetQueueSamples || 0,
+        clipEvents:         this.metrics.clipEvents         || 0,
       },
       tables: this.tables.map(t => ({ size: t.size, x: t.x, y: t.y, rotation: t.rotation, isFixed: !!t.isFixed })),
       fixedTables: this.fixedTables.map(t => ({ size: t.size, x: t.x, y: t.y, rotation: t.rotation || 0 })),
@@ -1780,6 +1859,57 @@ class SimulationEngine {
     if (path.failed) this._countRouteFailure(guest);
   }
 
+  // Niemand loopt door muren, tafels, de bar of de buffetlijn.
+  //
+  // Stoelen zijn bewust uitgezonderd: een zittende gast staat per definitie op
+  // zijn stoelanker. Alle overige meubels zijn hard. Elke tick waarin een agent
+  // toch in zulk meubilair staat is een clip, en die telt mee als metriek zodat
+  // een regressie meetbaar is in plaats van alleen zichtbaar.
+  _checkClip(agent) {
+    if (!this.navigator) return;
+    // Alleen tijdens het LOPEN tellen. Een stilstaande agent mag in hard
+    // meubilair staan: een zittende gast zit op zijn stoelanker, en dat anker
+    // valt deels binnen de opgeblazen tafelrand. De vraag is niet waar iemand
+    // staat maar of hij ergens dwars doorheen gaat, en dat is precies het
+    // geval waarin er nog route-punten open staan.
+    if (agent.path.length === 0) return;
+    if (this.navigator.isSolid(agent)) this.metrics.clipEvents++;
+  }
+
+  // Dichtstbijzijnde aanlooppunt van de buffetlijn.
+  _buffetPoint(guest) {
+    const pts = buffetSlotPoints(this.buffet);
+    return pts.reduce((best, p) => !best || dist(p, guest) < dist(best, guest) ? p : best, null);
+  }
+
+  // Pak een vrije plek aan de lijn. Geen plek vrij betekent wachten: de gast
+  // blijft staan waar hij staat en probeert het de volgende tick opnieuw --
+  // dat is de rij, en hij neemt intussen vloer in beslag.
+  _claimBuffetSlot(guest) {
+    const i = this.buffetBusy.indexOf(null);
+    if (i < 0) return -1;
+    this.buffetBusy[i] = guest;
+    return i;
+  }
+
+  _releaseBuffetSlot(guest) {
+    if (guest.buffetSlot === null) return;
+    if (this.buffetBusy[guest.buffetSlot] === guest) this.buffetBusy[guest.buffetSlot] = null;
+    guest.buffetSlot = null;
+  }
+
+  // Stuurt de gast naar het buffet als er een bezoek gepland staat.
+  _maybeGoToBuffet(guest) {
+    if (!this.buffet || guest.plannedBuffetTimes.length === 0) return false;
+    if (this.simTime < guest.plannedBuffetTimes[0]) return false;
+    guest.plannedBuffetTimes.shift();
+    guest.savedState = "SEATED";
+    guest.state = "BUFFET_WALK";
+    guest.buffetArrivedAt = -1;
+    this._routeAgent(guest, this._buffetPoint(guest));
+    return true;
+  }
+
   // Zit deze gast daadwerkelijk op zijn stoel?
   //
   // Een ober neemt alleen bestellingen op bij zittende gasten. Zonder deze
@@ -1869,6 +1999,7 @@ class SimulationEngine {
       const g = this.guests[i];
       const arrived = g.step(dt, this._crowdScale(g));
       if (arrived && g.path.length === 0) g.atSeat = true;
+      this._checkClip(g);
 
       // Accumulate waiting metric while in the WAITING/BAR states.
       if (g.state === "WAITING" || g.state === "BAR") {
@@ -1889,6 +2020,16 @@ class SimulationEngine {
                 const jitter = rndf(-0.3, 0.3);
                 g.drinksPlanned = Math.round(this.partyType.firstHourDrinks + (hoursStaying - 1) * perHourAvg + jitter);
                 g.drinksPlanned = Math.max(1, g.drinksPlanned);
+                // Buffetbezoeken plannen. Vuistregel uit het onderzoek:
+                // 1,3-1,5 passes per gast -- iedereen gaat een keer, 35% haalt
+                // seconds. De piek ligt 30-45 min na aankomst, dus daar valt
+                // het eerste bezoek.
+                g.plannedBuffetTimes = [];
+                if (this.buffet) {
+                  const first = g.arrivalSimTime + rndf(1200, 2700);
+                  g.plannedBuffetTimes.push(first);
+                  if (_rng() < 0.35) g.plannedBuffetTimes.push(first + rndf(2400, 4200));
+                }
                 // Schedule toilet visits.
                 const numToilets = Math.round(this.partyType.toiletVisitsAvg + rndf(-0.5, 0.5));
                 g.plannedToiletTimes = [];
@@ -1907,6 +2048,7 @@ class SimulationEngine {
         case "SEATED":
           g.timer -= dt;
           if (g.timer <= 0) {
+            if (this._maybeGoToBuffet(g)) break;
             // Check if next toilet is due while in SEATED.
             const nextToilet = g.plannedToiletTimes.length > 0 ? g.plannedToiletTimes[0] : Infinity;
             if (this.simTime >= nextToilet) {
@@ -1976,6 +2118,7 @@ class SimulationEngine {
               this.metrics.waitSamples++;
               g.state = "LEAVING"; this._routeAgent(g, this.exit);
             } else {
+              if (this._maybeGoToBuffet(g)) break;
               // Check for scheduled toilet before re-ordering.
               const nextToilet = g.plannedToiletTimes.length > 0 ? g.plannedToiletTimes[0] : Infinity;
               if (this.simTime >= nextToilet) {
@@ -2007,6 +2150,54 @@ class SimulationEngine {
                 this._routeGuestToSeat(g, g.seatPoint);
                 g.timer = this._nextDrinkInterval(g);
               }
+            }
+          }
+          break;
+
+        case "BUFFET_WALK":
+          // Feest voorbij terwijl hij nog onderweg is: omdraaien en vertrekken.
+          if (this.simTime >= this.partyEndSimTime) {
+            this._releaseBuffetSlot(g);
+            this._releaseSeat(g);
+            this.metrics.totalLeft++;
+            this.metrics.waitSum += g.totalWait;
+            this.metrics.waitSamples++;
+            g.state = "LEAVING";
+            this._routeAgent(g, this.exit);
+            break;
+          }
+          // Aangekomen bij de lijn. Is er plek, dan schept de gast op; zo niet,
+          // dan blijft hij staan wachten -- dat is de rij.
+          if (arrived) {
+            if (g.buffetArrivedAt < 0) g.buffetArrivedAt = this.simTime;
+            const slot = this._claimBuffetSlot(g);
+            if (slot >= 0) {
+              g.buffetSlot = slot;
+              g.state = "BUFFET";
+              g.timer = rndf(this.buffet.dwellRange[0], this.buffet.dwellRange[1]);
+              this.metrics.buffetQueueSum += this.simTime - g.buffetArrivedAt;
+              this.metrics.buffetQueueSamples++;
+            }
+          }
+          break;
+
+        case "BUFFET":
+          g.timer -= dt;
+          if (g.timer <= 0) {
+            this._releaseBuffetSlot(g);
+            this.metrics.buffetVisits++;
+            g.savedState = null;
+            if (this.simTime >= this.partyEndSimTime) {
+              this._releaseSeat(g);
+              this.metrics.totalLeft++;
+              this.metrics.waitSum += g.totalWait;
+              this.metrics.waitSamples++;
+              g.state = "LEAVING";
+              this._routeAgent(g, this.exit);
+            } else {
+              g.state = "SEATED";
+              this._routeGuestToSeat(g, g.seatPoint);
+              g.timer = rndf(30, 90);
             }
           }
           break;
@@ -2063,6 +2254,7 @@ class SimulationEngine {
     if (dt === 0) return;
     for (const w of this.waiters) {
       const arrived = w.step(dt, 1);
+      this._checkClip(w);
       switch (w.state) {
         case "IDLE": {
           // Find a table that's ordered but not served and isn't
@@ -2205,6 +2397,28 @@ class SimulationEngine {
     // Walls — a single thick stroked rectangle around the room.
     ctx.strokeStyle = "#2a2a36"; ctx.lineWidth = 4;
     ctx.strokeRect(2, 2, W - 4, H - 4);
+
+    // Buffetlijn tegen de linkerwand.
+    if (this.buffet) {
+      ctx.fillStyle = "#2a1f10";
+      roundRect(ctx, this.buffet.x, this.buffet.y, this.buffet.w, this.buffet.h, 6); ctx.fill();
+      ctx.strokeStyle = "#5a4222"; ctx.lineWidth = 2; ctx.stroke();
+      ctx.fillStyle = "#82828f";
+      ctx.font = "10px ui-monospace, monospace";
+      ctx.textAlign = "center";
+      ctx.save();
+      ctx.translate(this.buffet.x + this.buffet.w / 2, this.buffet.y + this.buffet.h / 2);
+      ctx.rotate(-Math.PI / 2);
+      ctx.fillText("BUFFET", 0, 3);
+      ctx.restore();
+      // Bezette plekken aan de lijn.
+      buffetSlotPoints(this.buffet).forEach((pt, i) => {
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, 4, 0, Math.PI * 2);
+        ctx.fillStyle = this.buffetBusy[i] ? "#f59f4a" : "#3a3a44";
+        ctx.fill();
+      });
+    }
 
     // Bar zone on the right wall.
     ctx.fillStyle = "#1f1610";
@@ -2356,7 +2570,7 @@ class SimulationEngine {
     this.runIndex += 1;
     this.guests   = [];
     this.waiters  = [];
-    this.metrics  = { totalServed: 0, totalLeft: 0, impatient: 0, waitSum: 0, waitSamples: 0, waiterDist: 0, score: 0, waiterPathFailures: 0, guestPathFailures: 0 };
+    this.metrics  = { totalServed: 0, totalLeft: 0, impatient: 0, waitSum: 0, waitSamples: 0, waiterDist: 0, score: 0, waiterPathFailures: 0, guestPathFailures: 0, buffetVisits: 0, buffetQueueSum: 0, buffetQueueSamples: 0, clipEvents: 0 };
     this.spawnQueue = [];
     this.entrance = { x: 48, y: config.roomH - 54 };
     this.exit     = this.entrance;
@@ -2365,12 +2579,14 @@ class SimulationEngine {
       w: 70, h: config.roomH - 100,
       dock: { x: config.roomW - 110, y: 80 },
     };
+    this.buffet = makeBuffet(config);
+    this.buffetBusy = this.buffet ? new Array(this.buffet.slots).fill(null) : [];
     for (let t = 0; t < 5; t++) {
       this.tables = this.generateLayout();
       if (!this.layoutError) break;
     }
     if (this.layoutError) return false;
-    this.navigator = new PathNavigator(config.roomW, config.roomH, this.tables, this.bar, this.obstacles);
+    this.navigator = new PathNavigator(config.roomW, config.roomH, this.tables, this.bar, this.obstacles, this.buffet);
     this._layoutReachCache = null;   // nieuwe layout -> bereikbaarheid opnieuw bepalen
     for (let i = 0; i < config.waiters; i++) {
       this.waiters.push(new Waiter(i,
@@ -2400,7 +2616,7 @@ class SimulationEngine {
     this.runIndex += 1;
     this.guests   = [];
     this.waiters  = [];
-    this.metrics  = { totalServed: 0, totalLeft: 0, impatient: 0, waitSum: 0, waitSamples: 0, waiterDist: 0, score: 0, waiterPathFailures: 0, guestPathFailures: 0 };
+    this.metrics  = { totalServed: 0, totalLeft: 0, impatient: 0, waitSum: 0, waitSamples: 0, waiterDist: 0, score: 0, waiterPathFailures: 0, guestPathFailures: 0, buffetVisits: 0, buffetQueueSum: 0, buffetQueueSamples: 0, clipEvents: 0 };
     this.spawnQueue = [];
     this.entrance = { x: 48, y: config.roomH - 54 };
     this.exit     = this.entrance;
@@ -2409,6 +2625,8 @@ class SimulationEngine {
       w: 70, h: config.roomH - 100,
       dock: { x: config.roomW - 110, y: 80 },
     };
+    this.buffet = makeBuffet(config);
+    this.buffetBusy = this.buffet ? new Array(this.buffet.slots).fill(null) : [];
     // Reset stateful fields on each table (geometry/positions unchanged).
     for (const t of tables) {
       t.guests         = [];
@@ -2417,7 +2635,7 @@ class SimulationEngine {
       t.drinksDelivered = 0;
     }
     this.tables = tables;
-    this.navigator = new PathNavigator(config.roomW, config.roomH, this.tables, this.bar, this.obstacles);
+    this.navigator = new PathNavigator(config.roomW, config.roomH, this.tables, this.bar, this.obstacles, this.buffet);
     this._layoutReachCache = null;   // nieuwe layout -> bereikbaarheid opnieuw bepalen
     for (let i = 0; i < config.waiters; i++) {
       this.waiters.push(new Waiter(i,
@@ -2474,6 +2692,10 @@ class SimulationEngine {
         pathFailures:      this.navigator ? this.navigator.pathFailures : 0,
         waiterPathFailures: this.metrics.waiterPathFailures || 0,
         guestPathFailures:  this.metrics.guestPathFailures  || 0,
+        buffetVisits:       this.metrics.buffetVisits       || 0,
+        buffetQueueSum:     this.metrics.buffetQueueSum     || 0,
+        buffetQueueSamples: this.metrics.buffetQueueSamples || 0,
+        clipEvents:         this.metrics.clipEvents         || 0,
       },
       tables: this.tables.map(t => ({
         size: t.size, x: t.x, y: t.y, rotation: t.rotation, w: t.w, h: t.h, seats: t.seats,
@@ -2961,7 +3183,7 @@ class BatchRunner {
     engine.waiters = [];
     engine.spawnQueue = [];
     engine.tables = engine.generateLayout();
-    engine.navigator = new PathNavigator(engine.config.roomW, engine.config.roomH, engine.tables, engine.bar, engine.obstacles);
+    engine.navigator = new PathNavigator(engine.config.roomW, engine.config.roomH, engine.tables, engine.bar, engine.obstacles, engine.buffet);
     engine._layoutReachCache = null;
   }
 
