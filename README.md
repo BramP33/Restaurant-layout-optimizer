@@ -417,6 +417,9 @@ bash ml/start_overnight.sh
 simulatie.html              # Full browser simulator (single file, no build step)
 best-layout.json            # Best layout found (270,685 px, 30-seed validated)
 requirements.txt            # Python dependencies for the core pipeline
+onderzoek/
+└── gastgedrag-buffetten-en-feesten.md   # Field figures for guest behaviour (drinks, toilet,
+                                         # buffet passes, mingling) — simulator fidelity, not ML
 ml/
 ├── optimize_layout.py      # Surrogate-guided layout search (500k candidates)
 ├── train_surrogate.py      # RF/XGBoost/GBT comparison, saves best model
