@@ -459,12 +459,17 @@
 //  Party type configuration
 // -----------------------------------------------------------------------
 const PARTY_TYPES = {
+  // Drankaantallen volgen onderzoek/gastgedrag-buffetten-en-feesten.md:
+  // ~1-1,5 drankjes per gast per uur met een piek in het eerste uur, en dat
+  // strookt met de fysiologie (de lever verwerkt ~1 standaarddrankje/uur).
+  // De oude waarden planden 9 drankjes over 5 uur buffet en 8,5 over 2,5 uur
+  // receptie -- respectievelijk ~50% en ruim het dubbele te hoog.
   receptie: {
     label: "Receptie",
     durationSec: 2.5 * 3600,
     arrivalWindowSec: 20 * 60,
-    firstHourDrinks: 4,
-    perHourDrinksRange: [3, 3],
+    firstHourDrinks: 2,
+    perHourDrinksRange: [1, 1.5],
     toiletVisitsAvg: 1.5,
     socializeChance: 0.35,
   },
@@ -472,8 +477,8 @@ const PARTY_TYPES = {
     label: "Warm-koud buffet",
     durationSec: 5 * 3600,
     arrivalWindowSec: 30 * 60,
-    firstHourDrinks: 3,
-    perHourDrinksRange: [1, 2],
+    firstHourDrinks: 2,
+    perHourDrinksRange: [1, 1.5],
     toiletVisitsAvg: 2.5,
     socializeChance: 0.18,
   },
@@ -481,8 +486,8 @@ const PARTY_TYPES = {
     label: "Feestavond",
     durationSec: 6.5 * 3600,
     arrivalWindowSec: 45 * 60,
-    firstHourDrinks: 3,
-    perHourDrinksRange: [1, 2],
+    firstHourDrinks: 2,
+    perHourDrinksRange: [1, 1.5],
     toiletVisitsAvg: 3,
     socializeChance: 0.30,
   },
@@ -1042,6 +1047,8 @@ class Guest {
     this.table = null;                   // assigned table reference
     this.chairIdx = -1;                  // chair index inside the table
     this.seatPoint = null;               // canonical seat position
+    this.seatUnreachable = false;        // route naar de stoel faalde
+    this.atSeat = false;                 // stoelroute helemaal afgelopen
     this.timer = 0;                      // seconds left in current state
     this.waitStart = -1;                 // sim time when WAITING began
     this.waitedFor = 0;                  // total seconds spent waiting
@@ -1728,6 +1735,7 @@ class SimulationEngine {
   // `path`. Every destination change goes through this helper so agents
   // consistently respect tables, chairs, and the bar surface.
   _routeAgent(agent, destination) {
+    agent.atSeat = false;   // elke andere bestemming haalt de gast van zijn stoel
     if (!this.navigator) {
       agent.target = destination;
       agent.path = [];
@@ -1767,7 +1775,27 @@ class SimulationEngine {
     guest.path = path.slice();
     guest.target = guest.path.shift()
                 || (path.failed ? { x: guest.x, y: guest.y } : seatPoint);
+    guest.seatUnreachable = !!path.failed;
+    guest.atSeat = false;
     if (path.failed) this._countRouteFailure(guest);
+  }
+
+  // Zit deze gast daadwerkelijk op zijn stoel?
+  //
+  // Een ober neemt alleen bestellingen op bij zittende gasten. Zonder deze
+  // toets ging SEATED -> WAITING puur op een timer, dus een gast die terugliep
+  // van het toilet of van een buurtafel werd onderweg al besteld en bediend --
+  // midden op de vloer, zonder stoel. Dat maakte de looproutes van de obers
+  // korter dan ze in werkelijkheid zijn.
+  // Niet op afstand toetsen: de A*-route eindigt op een gridcel bij de stoel,
+  // niet exact op het stoelanker, dus elke vaste drempel is of te streng (de
+  // gast hangt eeuwig) of te ruim. `atSeat` wordt gezet zodra step() meldt dat
+  // de hele route is afgelopen -- dat is per definitie zo dicht bij de stoel
+  // als de navigator komt.
+  _guestAtSeat(guest) {
+    if (!guest.seatPoint) return true;          // geen stoel bekend: niet blokkeren
+    if (guest.seatUnreachable) return true;     // stoel onbereikbaar: anders hangt hij eeuwig
+    return guest.atSeat;
   }
 
   // Waiters should not stand in the middle of a table. Pick a service
@@ -1840,6 +1868,7 @@ class SimulationEngine {
     for (let i = this.guests.length - 1; i >= 0; i--) {
       const g = this.guests[i];
       const arrived = g.step(dt, this._crowdScale(g));
+      if (arrived && g.path.length === 0) g.atSeat = true;
 
       // Accumulate waiting metric while in the WAITING/BAR states.
       if (g.state === "WAITING" || g.state === "BAR") {
@@ -1886,11 +1915,12 @@ class SimulationEngine {
               g.state = "TOILET";
               this._routeAgent(g, { x: this.canvas.width - 30, y: this.canvas.height - 30 });
               g.timer = rndf(150, 210);
-            } else {
+            } else if (this._guestAtSeat(g)) {
               g.state = "WAITING";
               g.waitStart = this.simTime;
               g.table.ordered = true;
             }
+            // Nog niet op de stoel: blijf SEATED en toets volgende tick opnieuw.
           }
           break;
 
