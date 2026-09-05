@@ -13,7 +13,7 @@ aantal vieze borden dat de bediening moet ophalen.
 - **1,3–1,5 buffetbezoeken per gast** over een dinerbuffet, waarvan de eerste ronde vrijwel 100% en
   een tweede ronde 30–40%. Caterers rekenen met dat getal om eten in te kopen.
 - **Afruimen is een aparte stroom werk.** Bij 36 zittende gasten zijn dat ~49 borden per avond.
-  Een ober draagt er 3 met de hand, 4 op een dienblad, tot 5 gestapeld — dus grofweg **12–16 extra
+  Een ober draagt er tot **7** bij het afruimen (hand, onderarm, hand) — dus grofweg **8–16 extra
   ritten**, bovenop de ~31 ritten die het drankjes rondbrengen nu kost.
 - **Norm voor snelheid:** een tafel afruimen en schoonmaken hoort in 30–45 seconden te gebeuren.
 - Het onderscheid dat telt voor de simulatie: **gasten lopen zelf naar het buffet, maar de obers
@@ -62,9 +62,14 @@ als aparte gang toevoegen, dan gaat het richting 2–3.
 | Parameter | Waarde | Hardheid |
 |---|---|---|
 | Tafel afruimen en schoonmaken | **30–45 s** | branchenorm |
-| Borden met de hand | **3** | praktijk |
 | Borden op een dienblad | **4** (max) | praktijk |
-| Gestapeld, goed stapelbaar | tot **5** | praktijk |
+| Borden dragend afruimen | **tot 7** | veldwaarneming |
+
+De gepubliceerde bronnen noemen 3 borden met de hand en 4 op een dienblad, maar dat gaat over
+*uitserveren*, waar de borden vol zijn en netjes moeten blijven. Bij **afruimen** ligt het hoger:
+één bord in de hand, een stapel op de onderarm en nog één in de andere hand. Bram's eigen
+veldwaarneming zet het maximum op **7**, en dat is het getal dat de simulator gebruikt — geschaald
+naar vakmanschap, want een beginner haalt die stapel niet.
 
 Verder geldt: in een formelere setting wacht je tot iedereen aan tafel klaar is voordat je die gang
 afruimt; casual mag per gast. Voor een buffet is per gast realistischer, want gasten gaan op eigen
@@ -97,7 +102,7 @@ veranderde: het halve mechanisme zat erin.
 1. Elk voltooid buffetbezoek legt een vies bord op de tafel van die gast.
 2. Een ober die toch in de buurt is neemt ze mee — of er komt een aparte afruimtaak zodra er
    genoeg borden liggen.
-3. Draagcapaciteit **4**, net als het dienblad. Dat maakt afruimen tot een ketenprobleem net als
+3. Draagcapaciteit **7**, geschaald naar vakmanschap (3 bij een beginner). Dat maakt afruimen tot een ketenprobleem net als
    het rondbrengen van drankjes: meerdere tafels in één rit.
 4. Afruimtijd **30–45 s** per tafel.
 5. De borden moeten ergens heen. De bar is het enige bestaande afgiftepunt; een aparte spoelhoek

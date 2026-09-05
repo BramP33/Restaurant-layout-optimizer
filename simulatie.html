@@ -218,6 +218,33 @@
       <option value="feestavond">Feestavond (6.5h)</option>
     </select>
 
+    <h2>Gezelschap</h2>
+    <div class="row">
+      <label>Gem. leeftijd</label>
+      <span class="val" id="avgAgeVal">40</span>
+    </div>
+    <input id="avgAge" type="range" min="20" max="75" step="1" value="40" />
+    <div class="row" style="margin-top:8px">
+      <label>Leeftijdsspreiding</label>
+      <span class="val" id="ageSpreadVal">15</span>
+    </div>
+    <input id="ageSpread" type="range" min="0" max="30" step="1" value="15" />
+    <div class="row" style="margin-top:8px">
+      <label>Dorst</label>
+      <span class="val" id="thirstVal">1.0</span>
+    </div>
+    <input id="thirst" type="range" min="0.5" max="2" step="0.05" value="1" />
+    <div class="row" style="margin-top:8px">
+      <label>Eetlust</label>
+      <span class="val" id="appetiteVal">1.0</span>
+    </div>
+    <input id="appetite" type="range" min="0.5" max="2" step="0.05" value="1" />
+    <div class="row" style="margin-top:8px">
+      <label>Vakmanschap bediening</label>
+      <span class="val" id="waiterSkillVal">0.50</span>
+    </div>
+    <input id="waiterSkill" type="range" min="0" max="1" step="0.05" value="0.5" />
+
     <h2>Population</h2>
     <div class="row">
       <label>Guests</label>
@@ -616,6 +643,44 @@ function shuffle(a) {
 // Pick one element at random from an array. Returns undefined if empty.
 const pick = (a) => a.length ? a[Math.floor(_rng() * a.length)] : undefined;
 
+// Normaalverdeling uit dezelfde geseede bron, zodat elke eigenschap die we
+// hieronder per gast of per ober trekken netjes met de seed meebeweegt.
+function gauss(mean, sd) {
+  const u = Math.max(1e-9, _rng()), v = _rng();
+  return mean + sd * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+const clampf = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
+
+// -----------------------------------------------------------------------
+//  Populatieprofiel
+// -----------------------------------------------------------------------
+//  Beschrijft het gezelschap en de bediening als verdelingen, niet als vaste
+//  waarden. Elke gast en elke ober trekt zijn eigen eigenschappen uit deze
+//  verdelingen met de geseede RNG, zodat twee runs met dezelfde seed exact
+//  hetzelfde gezelschap opleveren en twee verschillende seeds een ander
+//  publiek. Dat maakt de seed niet alleen een andere loop van de simulatie
+//  maar ook een ander gezelschap -- realistischer, en tegelijk een bredere
+//  ruisband op de uitkomst.
+// Hoe lang een vies bord maximaal mag blijven staan voordat een ober er toch
+// voor loopt, ook al is het geen volle lading. Vijf minuten is de orde waarop
+// het een gast begint op te vallen.
+const CLEARING_PATIENCE_SEC = 300;
+
+const POPULATION_DEFAULTS = {
+  avgAge:      40,    // gemiddelde leeftijd van het gezelschap
+  ageSpread:   15,    // spreiding daaromheen
+  thirst:      1.0,   // 0,5 = zuinig publiek, 1,5 = stevige drinkers
+  appetite:    1.0,   // hoe vaak men terugloopt naar het buffet
+  waiterSkill: 0.5,   // 0 = eerste dienst, 1 = doorgewinterd
+  skillSpread: 0.2,
+};
+
+// Leeftijdseffecten. Alle drie gecentreerd op 40 jaar, zodat het profiel met
+// de standaardwaarden precies het oude gedrag reproduceert.
+const ageSpeedFactor  = (a) => clampf(1.25 - a / 160, 0.65, 1.15);   // jonger loopt harder
+const ageSocialFactor = (a) => clampf(1.50 - a / 60,  0.60, 1.40);   // jonger mengt meer
+const ageToiletFactor = (a) => clampf(1 + (a - 40) / 100, 0.80, 1.60); // ouder vaker naar het toilet
+
 // AABB overlap test inflated by `pad`. The layout optimizer uses this to
 // reject candidate tables that would intersect with already-placed
 // furniture, the bar zone, or the entrance corridor. Padding represents
@@ -969,6 +1034,8 @@ class Table {
     this.chairs = this.computeChairs();
     this.guests = [];
     this.ordered = false;
+    this.dirtyPlates = 0;             // vieze borden die opgehaald moeten worden
+    this.oldestPlateAt = null;        // sim-tijd van het oudste bord
     this.orderTakenAt = -1;
     this.drinksDelivered = 0;
   }
@@ -1092,12 +1159,16 @@ class Table {
 //    BAR           - impatient: gave up waiting and stomped to the bar
 //    LEAVING       - heading to the exit; will be removed when off-screen
 class Guest {
-  constructor(id, spawn) {
+  constructor(id, spawn, pop = POPULATION_DEFAULTS) {
     this.id = id;
     this.x = spawn.x; this.y = spawn.y;
-    // Random base speed (px/sec). The actual speed gets scaled at update
-    // time by the crowd-density modifier so packed corridors feel slower.
-    this.speed = rndf(55, 75);
+    // Persoonlijke eigenschappen, getrokken uit het populatieprofiel.
+    this.age      = Math.round(clampf(gauss(pop.avgAge, pop.ageSpread), 16, 90));
+    this.thirst   = clampf(gauss(pop.thirst,   0.25), 0.4, 2.0);
+    this.appetite = clampf(gauss(pop.appetite, 0.25), 0.3, 2.0);
+    // Random base speed (px/sec), geschaald naar leeftijd. De crowd-modifier
+    // komt daar tijdens de update nog overheen.
+    this.speed = rndf(55, 75) * ageSpeedFactor(this.age);
     this.r = 7;                          // render radius
     this.state = "WALKING";
     this.target = null;                  // current move target (or null)
@@ -1195,19 +1266,29 @@ class Guest {
 //  The serving plan is a list of table IDs, sorted by nearest-first from
 //  the waiter's current position at the time the trip begins.
 class Waiter {
-  constructor(id, home, colour) {
+  constructor(id, home, colour, pop = POPULATION_DEFAULTS) {
     this.id = id;
     this.x = home.x; this.y = home.y;
     this.home = home;                   // bar pickup point
     this.colour = colour;
-    this.speed = rndf(85, 105);         // px/sec base
+    // Vakmanschap: bepaalt hoeveel hij draagt, hoe vlot hij werkt en hoe hard
+    // hij loopt. Bij skill 0,5 komt alles uit op de oude vaste waarden.
+    this.skill = clampf(gauss(pop.waiterSkill, pop.skillSpread), 0, 1);
+    this.speed = rndf(85, 105) * (0.9 + 0.25 * this.skill);
     this.state = "IDLE";
     this.target = null;
     this.path = [];                      // A* waypoints around tables/chairs
     this.targetTable = null;            // table reference, when relevant
     this.servePlan = [];                // queue of table IDs to serve
     this.carrying = 0;                  // drinks currently on tray
-    this.capacity = 8;                  // task spec: max 8 drinks
+    // Draagvermogen schaalt met vakmanschap. Drankjes 6-10 (was vast 8).
+    // Borden 3-7: een geoefende ober neemt er een in de hand, een stapel op
+    // de onderarm en nog een in de andere hand.
+    this.capacity      = Math.round(6 + 4 * this.skill);
+    this.plateCapacity = Math.round(3 + 4 * this.skill);
+    // Tempo bij het opnemen en ophalen: groen werkt trager, ervaren vlotter.
+    this.paceFactor    = 1.25 - 0.5 * this.skill;
+    this.platesHeld = 0;                // vieze borden op de arm
     this.timer = 0;                     // dwell timer for ORDER/COLLECT
     this.distance = 0;                  // total px walked (metric)
   }
@@ -1291,6 +1372,7 @@ class SimulationEngine {
       waitSum: 0, waitSamples: 0, waiterDist: 0, score: 0,
       waiterPathFailures: 0, guestPathFailures: 0,
       buffetVisits: 0, buffetQueueSum: 0, buffetQueueSamples: 0,
+      platesDropped: 0, platesCleared: 0, clearingTrips: 0,
       clipEvents: 0,
     };
 
@@ -1344,6 +1426,7 @@ class SimulationEngine {
       waitSum: 0, waitSamples: 0, waiterDist: 0, score: 0,
       waiterPathFailures: 0, guestPathFailures: 0,
       buffetVisits: 0, buffetQueueSum: 0, buffetQueueSamples: 0,
+      platesDropped: 0, platesCleared: 0, clearingTrips: 0,
       clipEvents: 0,
     };
     this.spawnQueue = [];               // pre-baked guest spawn schedule
@@ -1359,6 +1442,7 @@ class SimulationEngine {
       dock: { x: config.roomW - 110, y: 80 },
     };
     this.buffet = makeBuffet(config);
+    this.population = { ...POPULATION_DEFAULTS, ...(config.population || {}) };
     this.buffetBusy = this.buffet ? new Array(this.buffet.slots).fill(null) : [];
 
     // Generate a layout. Retry up to 5 times — the random sampler can
@@ -1384,7 +1468,9 @@ class SimulationEngine {
 
     // Spawn waiters at the bar dock with distinct colours.
     for (let i = 0; i < config.waiters; i++) {
-      this.waiters.push(new Waiter(i, { x: this.bar.dock.x, y: this.bar.dock.y + i * 22 }, this.waiterColours[i % this.waiterColours.length]));
+      this.waiters.push(new Waiter(i, { x: this.bar.dock.x, y: this.bar.dock.y + i * 22 },
+                                   this.waiterColours[i % this.waiterColours.length],
+                                   this.population));
     }
 
     // Stagger guest arrivals over partyType.arrivalWindowSec.
@@ -1694,6 +1780,9 @@ class SimulationEngine {
         buffetQueueSum:     this.metrics.buffetQueueSum     || 0,
         buffetQueueSamples: this.metrics.buffetQueueSamples || 0,
         clipEvents:         this.metrics.clipEvents         || 0,
+        platesDropped:      this.metrics.platesDropped      || 0,
+        platesCleared:      this.metrics.platesCleared      || 0,
+        clearingTrips:      this.metrics.clearingTrips      || 0,
       },
       tables: this.tables.map(t => ({ size: t.size, x: t.x, y: t.y, rotation: t.rotation, isFixed: !!t.isFixed })),
       fixedTables: this.fixedTables.map(t => ({ size: t.size, x: t.x, y: t.y, rotation: t.rotation || 0 })),
@@ -1771,7 +1860,9 @@ class SimulationEngine {
     if (this.simTime > this.partyEndSimTime) { this.spawnQueue = []; return; }
     while (this.spawnQueue.length && this.spawnQueue[0].at <= this.simTime) {
       this.spawnQueue.shift();
-      const g = new Guest(this.guests.length, { x: this.entrance.x, y: this.entrance.y - rndf(0, 12) });
+      const g = new Guest(this.guests.length,
+                          { x: this.entrance.x, y: this.entrance.y - rndf(0, 12) },
+                          this.population);
       g.arrivalSimTime = this.simTime;
       // Try to seat at a table with a free chair.
       const free = this.tables.filter(t => t.guests.length < t.seats);
@@ -1874,6 +1965,42 @@ class SimulationEngine {
     // geval waarin er nog route-punten open staan.
     if (agent.path.length === 0) return;
     if (this.navigator.isSolid(agent)) this.metrics.clipEvents++;
+  }
+
+  // Dichtstbijzijnde tafel met vieze borden die nog niet geclaimd is.
+  _nextDirtyTable(waiter) {
+    if (waiter.platesHeld >= waiter.plateCapacity) return null;
+    const claimed = new Set(this.waiters
+      .filter(o => o !== waiter && o.targetTable)
+      .map(o => o.targetTable.id));
+    const dirty = this.tables.filter(t => (t.dirtyPlates || 0) > 0 && !claimed.has(t.id));
+    if (!dirty.length) return null;
+    return dirty.reduce((best, t) =>
+      !best || dist(t.centre(), waiter) < dist(best.centre(), waiter) ? t : best, null);
+  }
+
+  // Start een afruimrit als het de moeite loont.
+  //
+  // Zonder drempel vertrekt een ober voor een enkel bordje zodra hij even
+  // niets te doen heeft, en dan loopt hij de zaal door voor 1,6 bord per rit
+  // terwijl er zeven op zijn arm passen. Een ober wacht tot er een redelijke
+  // lading ligt -- maar laat een bord ook niet eindeloos staan, want dan
+  // staat de zaal vol vuil serviesgoed.
+  _maybeStartClearing(waiter, claimed) {
+    const dirty = this.tables.filter(t => (t.dirtyPlates || 0) > 0 && !claimed.has(t.id));
+    if (!dirty.length) return false;
+
+    const total  = dirty.reduce((n, t) => n + t.dirtyPlates, 0);
+    const oldest = Math.min(...dirty.map(t => t.oldestPlateAt ?? this.simTime));
+    const worthATrip = total >= Math.max(2, Math.round(waiter.plateCapacity * 0.6));
+    const tooLong    = this.simTime - oldest > CLEARING_PATIENCE_SEC;
+    if (!worthATrip && !tooLong) return false;
+    const t = dirty.reduce((best, o) =>
+      !best || dist(o.centre(), waiter) < dist(best.centre(), waiter) ? o : best, null);
+    waiter.targetTable = t;
+    this._routeAgent(waiter, this._servicePoint(t, waiter));
+    waiter.state = "CLEARING_WALK";
+    return true;
   }
 
   // Dichtstbijzijnde aanlooppunt van de buffetlijn.
@@ -2018,7 +2145,9 @@ class SimulationEngine {
                 const hoursStaying = stayDuration / 3600;
                 const perHourAvg = (this.partyType.perHourDrinksRange[0] + this.partyType.perHourDrinksRange[1]) / 2;
                 const jitter = rndf(-0.3, 0.3);
-                g.drinksPlanned = Math.round(this.partyType.firstHourDrinks + (hoursStaying - 1) * perHourAvg + jitter);
+                g.drinksPlanned = Math.round(
+                  (this.partyType.firstHourDrinks + (hoursStaying - 1) * perHourAvg + jitter)
+                  * g.thirst);
                 g.drinksPlanned = Math.max(1, g.drinksPlanned);
                 // Buffetbezoeken plannen. Vuistregel uit het onderzoek:
                 // 1,3-1,5 passes per gast -- iedereen gaat een keer, 35% haalt
@@ -2028,10 +2157,13 @@ class SimulationEngine {
                 if (this.buffet) {
                   const first = g.arrivalSimTime + rndf(1200, 2700);
                   g.plannedBuffetTimes.push(first);
-                  if (_rng() < 0.35) g.plannedBuffetTimes.push(first + rndf(2400, 4200));
+                  if (_rng() < 0.35 * g.appetite) {
+                    g.plannedBuffetTimes.push(first + rndf(2400, 4200));
+                  }
                 }
                 // Schedule toilet visits.
-                const numToilets = Math.round(this.partyType.toiletVisitsAvg + rndf(-0.5, 0.5));
+                const numToilets = Math.max(0, Math.round(
+                  (this.partyType.toiletVisitsAvg + rndf(-0.5, 0.5)) * ageToiletFactor(g.age)));
                 g.plannedToiletTimes = [];
                 for (let i = 0; i < numToilets; i++) {
                   const frac = (i + rndf(0.3, 0.7)) / Math.max(1, numToilets);
@@ -2127,7 +2259,8 @@ class SimulationEngine {
                 g.state = "TOILET";
                 this._routeAgent(g, { x: this.canvas.width - 30, y: this.canvas.height - 30 });
                 g.timer = rndf(150, 210);
-              } else if (_rng() < this.partyType.socializeChance && this.tables.length > 1) {
+              } else if (_rng() < this.partyType.socializeChance * ageSocialFactor(g.age)
+                         && this.tables.length > 1) {
                 // Socialize: visit a neighbour table briefly.
                 const others = this.tables.filter(t => t !== g.table);
                 const nb = others.reduce((best, t) =>
@@ -2186,6 +2319,14 @@ class SimulationEngine {
           if (g.timer <= 0) {
             this._releaseBuffetSlot(g);
             this.metrics.buffetVisits++;
+            // Elke ronde door de lijn vraagt een schoon bord -- dat is een
+            // hygiene-eis, geen etiquette -- dus elke ronde laat er ook een
+            // vies bord achter op de tafel van deze gast.
+            if (g.table) {
+              if (!g.table.dirtyPlates) g.table.oldestPlateAt = this.simTime;
+              g.table.dirtyPlates = (g.table.dirtyPlates || 0) + 1;
+              this.metrics.platesDropped++;
+            }
             g.savedState = null;
             if (this.simTime >= this.partyEndSimTime) {
               this._releaseSeat(g);
@@ -2264,7 +2405,12 @@ class SimulationEngine {
             t.ordered &&
             t.guests.some(g => g.state === "WAITING" && !g.served) &&
             !claimed.has(t.id));
-          if (!wanting.length) break;
+          if (!wanting.length) {
+            // Niets te bedienen: dan afruimen. Drankjes hebben voorrang,
+            // want daar staat een gast op te wachten; vieze borden niet.
+            this._maybeStartClearing(w, claimed);
+            break;
+          }
           wanting.sort((a, b) => dist(a.centre(), w) - dist(b.centre(), w));
           const t = wanting[0];
           w.targetTable = t;
@@ -2272,8 +2418,45 @@ class SimulationEngine {
           w.state = "WALKING_TO_TABLE";
           break;
         }
+
+        case "CLEARING_WALK":
+          if (arrived) { w.state = "CLEARING"; w.timer = rndf(30, 45) * w.paceFactor; }
+          break;
+
+        case "CLEARING":
+          w.timer -= dt;
+          if (w.timer <= 0) {
+            const ct = w.targetTable;
+            if (ct) {
+              const take = Math.min(ct.dirtyPlates || 0, w.plateCapacity - w.platesHeld);
+              ct.dirtyPlates -= take;
+              w.platesHeld  += take;
+              if (ct.dirtyPlates <= 0) ct.oldestPlateAt = null;
+            }
+            w.targetTable = null;
+            // Nog ruimte op de arm? Dan onderweg nog een tafel meepakken.
+            const nextT = this._nextDirtyTable(w);
+            if (nextT) {
+              w.targetTable = nextT;
+              this._routeAgent(w, this._servicePoint(nextT, w));
+              w.state = "CLEARING_WALK";
+            } else {
+              this._routeAgent(w, this.bar.dock);
+              w.state = "RETURNING_PLATES";
+            }
+          }
+          break;
+
+        case "RETURNING_PLATES":
+          if (arrived) {
+            this.metrics.platesCleared += w.platesHeld;
+            this.metrics.clearingTrips++;
+            w.platesHeld = 0;
+            w.state = "IDLE";
+          }
+          break;
         case "WALKING_TO_TABLE":
-          if (arrived) { w.state = "TAKING_ORDER"; w.timer = 30; }
+          if (arrived) { w.state = "TAKING_ORDER"; w.timer = 30 * w.paceFactor; }
           break;
         case "TAKING_ORDER":
           w.timer -= dt;
@@ -2303,7 +2486,7 @@ class SimulationEngine {
           }
           break;
         case "WALKING_TO_BAR":
-          if (arrived) { w.state = "COLLECTING_DRINKS"; w.timer = 45; }
+          if (arrived) { w.state = "COLLECTING_DRINKS"; w.timer = 45 * w.paceFactor; }
           break;
         case "COLLECTING_DRINKS":
           w.timer -= dt;
@@ -2570,7 +2753,7 @@ class SimulationEngine {
     this.runIndex += 1;
     this.guests   = [];
     this.waiters  = [];
-    this.metrics  = { totalServed: 0, totalLeft: 0, impatient: 0, waitSum: 0, waitSamples: 0, waiterDist: 0, score: 0, waiterPathFailures: 0, guestPathFailures: 0, buffetVisits: 0, buffetQueueSum: 0, buffetQueueSamples: 0, clipEvents: 0 };
+    this.metrics  = { totalServed: 0, totalLeft: 0, impatient: 0, waitSum: 0, waitSamples: 0, waiterDist: 0, score: 0, waiterPathFailures: 0, guestPathFailures: 0, buffetVisits: 0, buffetQueueSum: 0, buffetQueueSamples: 0, platesDropped: 0, platesCleared: 0, clearingTrips: 0, clipEvents: 0 };
     this.spawnQueue = [];
     this.entrance = { x: 48, y: config.roomH - 54 };
     this.exit     = this.entrance;
@@ -2580,6 +2763,7 @@ class SimulationEngine {
       dock: { x: config.roomW - 110, y: 80 },
     };
     this.buffet = makeBuffet(config);
+    this.population = { ...POPULATION_DEFAULTS, ...(config.population || {}) };
     this.buffetBusy = this.buffet ? new Array(this.buffet.slots).fill(null) : [];
     for (let t = 0; t < 5; t++) {
       this.tables = this.generateLayout();
@@ -2616,7 +2800,7 @@ class SimulationEngine {
     this.runIndex += 1;
     this.guests   = [];
     this.waiters  = [];
-    this.metrics  = { totalServed: 0, totalLeft: 0, impatient: 0, waitSum: 0, waitSamples: 0, waiterDist: 0, score: 0, waiterPathFailures: 0, guestPathFailures: 0, buffetVisits: 0, buffetQueueSum: 0, buffetQueueSamples: 0, clipEvents: 0 };
+    this.metrics  = { totalServed: 0, totalLeft: 0, impatient: 0, waitSum: 0, waitSamples: 0, waiterDist: 0, score: 0, waiterPathFailures: 0, guestPathFailures: 0, buffetVisits: 0, buffetQueueSum: 0, buffetQueueSamples: 0, platesDropped: 0, platesCleared: 0, clearingTrips: 0, clipEvents: 0 };
     this.spawnQueue = [];
     this.entrance = { x: 48, y: config.roomH - 54 };
     this.exit     = this.entrance;
@@ -2626,10 +2810,13 @@ class SimulationEngine {
       dock: { x: config.roomW - 110, y: 80 },
     };
     this.buffet = makeBuffet(config);
+    this.population = { ...POPULATION_DEFAULTS, ...(config.population || {}) };
     this.buffetBusy = this.buffet ? new Array(this.buffet.slots).fill(null) : [];
     // Reset stateful fields on each table (geometry/positions unchanged).
     for (const t of tables) {
       t.guests         = [];
+      t.dirtyPlates    = 0;
+      t.oldestPlateAt  = null;
       t.ordered        = false;
       t.orderTakenAt   = -1;
       t.drinksDelivered = 0;
@@ -2696,6 +2883,9 @@ class SimulationEngine {
         buffetQueueSum:     this.metrics.buffetQueueSum     || 0,
         buffetQueueSamples: this.metrics.buffetQueueSamples || 0,
         clipEvents:         this.metrics.clipEvents         || 0,
+        platesDropped:      this.metrics.platesDropped      || 0,
+        platesCleared:      this.metrics.platesCleared      || 0,
+        clearingTrips:      this.metrics.clearingTrips      || 0,
       },
       tables: this.tables.map(t => ({
         size: t.size, x: t.x, y: t.y, rotation: t.rotation, w: t.w, h: t.h, seats: t.seats,
@@ -2838,6 +3028,9 @@ class BatchRunner {
   // Live label updates for the two range sliders.
   $("guests").addEventListener("input", (e) => $("guestsVal").textContent = e.target.value);
   $("waiters").addEventListener("input", (e) => $("waitersVal").textContent = e.target.value);
+  [["avgAge", 0], ["ageSpread", 0], ["thirst", 2], ["appetite", 2], ["waiterSkill", 2]]
+    .forEach(([id, dec]) => $(id).addEventListener("input",
+      (e) => $(id + "Val").textContent = parseFloat(e.target.value).toFixed(dec)));
 
   function readConfig() {
     return {
@@ -2852,6 +3045,13 @@ class BatchRunner {
       speed:    parseInt($("speed").value,    10),
       seed:     $("seed").value ? parseInt($("seed").value, 10) : null,
       partyType: $("partyType").value,
+      population: {
+        avgAge:      parseFloat($("avgAge").value),
+        ageSpread:   parseFloat($("ageSpread").value),
+        thirst:      parseFloat($("thirst").value),
+        appetite:    parseFloat($("appetite").value),
+        waiterSkill: parseFloat($("waiterSkill").value),
+      },
     };
   }
 

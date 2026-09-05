@@ -50,6 +50,10 @@ async function runValidation(page, layout, nSeeds) {
         gridSize: 24,
         forcedLayout: varTables,
       };
+      // Populatieprofiel meegeven als het in de invoer staat, zodat de
+      // pipeline gezelschappen kan varieren. Ontbreekt het, dan vallen de
+      // agents terug op POPULATION_DEFAULTS en is het gedrag ongewijzigd.
+      if (layout.config && layout.config.population) cfg.population = layout.config.population;
 
       const batch  = new BatchRunner(engine);
       const runs   = [];
