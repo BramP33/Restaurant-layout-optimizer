@@ -259,6 +259,13 @@ def layout_valid(blocked, tables, n_waiters=3):
     if sizes[floor] < 10 or not in_floor(BAR_DOCK):
         return False, len(tables), trapped
 
+    # Spiegel van de buffettoets in simulatie.html: een indeling die de
+    # buffetlijn afsluit is ongeldig. Zonder deze regel keurt de zeef iets
+    # anders goed dan de simulator, en dat verschil is precies waar een
+    # optimizer op afgaat.
+    if not any(in_floor(p) for p in buffet_slot_points()):
+        return False, len(tables), trapped
+
     unreachable = 0
     for t in tables:
         if not any(in_floor(p) for p in service_points(t)):
@@ -365,6 +372,14 @@ def table_access(blocked, dist, t):
 # Ze toch in het grid zetten meet een andere vloer dan waar het target vandaan
 # komt: het sluit doorgangen af die in de simulatie openstaan.
 N_PATH_FEATURES = 24
+
+
+def buffet_slot_points():
+    """Aanlooppunten op de zaalkant van de buffetlijn -- zelfde formule als
+    buffetSlotPoints() in simulatie.html."""
+    fx, fy, fw, fh = BUFFET_RECT
+    slots = 3
+    return [(fx + fw + 26, fy + (i + 0.5) / slots * fh) for i in range(slots)]
 
 
 def overlaps_buffet(tables):

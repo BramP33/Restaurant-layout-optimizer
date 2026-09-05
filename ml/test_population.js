@@ -109,24 +109,41 @@ function summarise(page, seed, population) {
       forcedLayout: tables,
       population: { waiterSkill: skill, skillSpread: 0.01 },
     };
+    // BEIDE batch-paden toetsen. BatchRunner gebruikt _batchStart voor de
+    // eerste seed en _batchStartWithLayout voor de volgende, dus een test die
+    // er maar een aanraakt kan het profiel op het andere pad stil verliezen --
+    // precies hoe deze bug er de eerste keer in kwam.
     engine._batchStart({ ...cfg, seed: 4242 });
-    return {
+    const viaStart = {
       skills:   engine.waiters.map(w => +w.skill.toFixed(3)),
       drinkCap: engine.waiters.map(w => w.capacity),
       plateCap: engine.waiters.map(w => w.plateCapacity),
     };
+    const built = engine.tables;
+    engine._batchStartWithLayout({ ...cfg, seed: 4242 }, built, 4242);
+    const viaLayout = {
+      skills:   engine.waiters.map(w => +w.skill.toFixed(3)),
+      drinkCap: engine.waiters.map(w => w.capacity),
+      plateCap: engine.waiters.map(w => w.plateCapacity),
+    };
+    return { viaStart, viaLayout };
   }, skill);
 
   const groenB = await viaBatch(0.0);
   const topB   = await viaBatch(1.0);
   await browser2.close();
 
-  check("profiel bereikt de obers via het batch-pad",
-        !eq(groenB, topB),
-        `groen: skill ${groenB.skills[0]}, ${groenB.plateCap[0]} borden / ${groenB.drinkCap[0]} drankjes  |  ` +
-        `ervaren: skill ${topB.skills[0]}, ${topB.plateCap[0]} borden / ${topB.drinkCap[0]} drankjes`);
-  check("borden ook via het batch-pad nooit boven 7",
-        Math.max(...topB.plateCap, ...groenB.plateCap) <= 7);
+  check("profiel bereikt de obers via _batchStart",
+        !eq(groenB.viaStart, topB.viaStart),
+        `groen ${groenB.viaStart.plateCap[0]} borden / ${groenB.viaStart.drinkCap[0]} drankjes  |  ` +
+        `ervaren ${topB.viaStart.plateCap[0]} / ${topB.viaStart.drinkCap[0]}`);
+  check("profiel bereikt de obers via _batchStartWithLayout",
+        !eq(groenB.viaLayout, topB.viaLayout),
+        `groen ${groenB.viaLayout.plateCap[0]} borden / ${groenB.viaLayout.drinkCap[0]} drankjes  |  ` +
+        `ervaren ${topB.viaLayout.plateCap[0]} / ${topB.viaLayout.drinkCap[0]}`);
+  check("borden ook via beide batch-paden nooit boven 7",
+        Math.max(...topB.viaStart.plateCap, ...topB.viaLayout.plateCap,
+                 ...groenB.viaStart.plateCap, ...groenB.viaLayout.plateCap) <= 7);
 
   console.log(fail ? `\n${fail} controle(s) gefaald.` : "\nAlles in orde.");
   process.exit(fail ? 1 : 0);

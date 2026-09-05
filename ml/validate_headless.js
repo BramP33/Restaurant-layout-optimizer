@@ -87,8 +87,8 @@ async function runValidation(page, layout, nSeeds) {
           }));
           resolve({
             rank:           layout.rank,
-            predicted_dist: layout.predicted_waiterDist,
-            predicted_score: layout.predicted_score,
+            predicted_dist:  layout.predicted_waiterDist ?? 0,
+            predicted_score: layout.predicted_score ?? 0,
             actual_dist:    avg(dists),
             actual_score:   avg(scores),
             seeds:          results.map(r => r.seed),
@@ -171,7 +171,7 @@ async function runValidation(page, layout, nSeeds) {
         console.log(`FOUT: ${result.error}`);
       } else {
         const scoreErr = (result.actual_score - (result.predicted_score ?? 0)).toFixed(0);
-        const distErr  = Math.round(result.actual_dist - result.predicted_dist).toLocaleString();
+        const distErr  = Math.round(result.actual_dist - (result.predicted_dist ?? 0)).toLocaleString();
         console.log(`actueel score=${result.actual_score.toFixed(0)}  ` +
                     `dist=${Math.round(result.actual_dist).toLocaleString()} px  ` +
                     `(fout: score${scoreErr > 0 ? '+' : ''}${scoreErr}, dist${distErr})  ` +
@@ -201,8 +201,13 @@ async function runValidation(page, layout, nSeeds) {
   const pad = (s, n) => String(s).padEnd(n);
   console.log(`  ${pad('#rank',6)} ${pad('voorspeld',12)} ${pad('actueel',12)} fout`);
   for (const r of validationResults) {
-    const err = (r.actual_score - r.predicted_score).toFixed(0);
-    console.log(`  ${pad('#'+r.rank,6)} ${pad(r.predicted_score.toFixed(0),12)} ${pad(r.actual_score.toFixed(0),12)} ${err}`);
+    // Een invoerbestand zonder voorspelling (best-layout.json bijvoorbeeld) is
+    // legitiem: dan valideer je gewoon een bekende indeling. Dat mag de
+    // samenvatting niet opblazen, want de uitvoer is dan al weggeschreven en
+    // de aanroeper ziet alleen nog exitcode 1.
+    const pv  = r.predicted_score ?? 0;
+    const err = (r.actual_score - pv).toFixed(0);
+    console.log(`  ${pad('#'+r.rank,6)} ${pad(pv.toFixed(0),12)} ${pad(r.actual_score.toFixed(0),12)} ${err}`);
   }
 
   // Best gevonden layout

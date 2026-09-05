@@ -1711,8 +1711,18 @@ class SimulationEngine {
         .some(p => inFloor(nav.nearestOpenPoint(p, 3)));
       if (!ok) unreachable++;
     }
+
+    // De buffetlijn moet ook te bereiken zijn. Zonder deze toets blijft een
+    // indeling die het buffet afsluit gewoon geldig: gasten kunnen er niet
+    // heen, dus er komen minder vieze borden, dus hoeven de obers minder af
+    // te ruimen -- en dat maakt de layout goedkoop om de verkeerde reden.
+    // Precies het soort hoekje waar de optimizer hier al twee keer in kroop.
+    const buffetBoxedIn = !!this.buffet &&
+      !buffetSlotPoints(this.buffet).some(p => inFloor(nav.nearestOpenPoint(p, 3)));
+
     return {
-      valid: !dockBoxedIn && unreachable === 0 && trappedWaiters === 0,
+      valid: !dockBoxedIn && !buffetBoxedIn && unreachable === 0 && trappedWaiters === 0,
+      buffetBoxedIn,
       unreachable,
       dockBoxedIn,
       trappedWaiters,
