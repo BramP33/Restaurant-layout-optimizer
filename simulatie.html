@@ -678,7 +678,7 @@ const POPULATION_DEFAULTS = {
 // Leeftijdseffecten. Alle drie gecentreerd op 40 jaar, zodat het profiel met
 // de standaardwaarden precies het oude gedrag reproduceert.
 const ageSpeedFactor  = (a) => clampf(1.25 - a / 160, 0.65, 1.15);   // jonger loopt harder
-const ageSocialFactor = (a) => clampf(1.50 - a / 60,  0.60, 1.40);   // jonger mengt meer
+const ageSocialFactor = (a) => clampf(1 + (40 - a) / 60, 0.60, 1.40); // jonger mengt meer
 const ageToiletFactor = (a) => clampf(1 + (a - 40) / 100, 0.80, 1.60); // ouder vaker naar het toilet
 
 // AABB overlap test inflated by `pad`. The layout optimizer uses this to
@@ -1274,7 +1274,7 @@ class Waiter {
     // Vakmanschap: bepaalt hoeveel hij draagt, hoe vlot hij werkt en hoe hard
     // hij loopt. Bij skill 0,5 komt alles uit op de oude vaste waarden.
     this.skill = clampf(gauss(pop.waiterSkill, pop.skillSpread), 0, 1);
-    this.speed = rndf(85, 105) * (0.9 + 0.25 * this.skill);
+    this.speed = rndf(85, 105) * (0.875 + 0.25 * this.skill);
     this.state = "IDLE";
     this.target = null;
     this.path = [];                      // A* waypoints around tables/chairs
@@ -1372,7 +1372,7 @@ class SimulationEngine {
       waitSum: 0, waitSamples: 0, waiterDist: 0, score: 0,
       waiterPathFailures: 0, guestPathFailures: 0,
       buffetVisits: 0, buffetQueueSum: 0, buffetQueueSamples: 0,
-      platesDropped: 0, platesCleared: 0, clearingTrips: 0,
+      platesDropped: 0, platesCleared: 0, clearingTrips: 0, platesLeft: 0,
       clipEvents: 0,
     };
 
@@ -1426,7 +1426,7 @@ class SimulationEngine {
       waitSum: 0, waitSamples: 0, waiterDist: 0, score: 0,
       waiterPathFailures: 0, guestPathFailures: 0,
       buffetVisits: 0, buffetQueueSum: 0, buffetQueueSamples: 0,
-      platesDropped: 0, platesCleared: 0, clearingTrips: 0,
+      platesDropped: 0, platesCleared: 0, clearingTrips: 0, platesLeft: 0,
       clipEvents: 0,
     };
     this.spawnQueue = [];               // pre-baked guest spawn schedule
@@ -1732,11 +1732,18 @@ class SimulationEngine {
     const avgWait = m.waitSamples ? m.waitSum / m.waitSamples : 0;
     const served = m.totalServed;
     const dist = m.waiterDist;
+    // Afruimen kost looplengte en leverde tot nu toe niets op, dus de enige
+    // prikkel was om het niet te doen. Borden die aan het eind nog op tafel
+    // staan zijn slechte bediening en horen dus te kosten. Zonder deze term
+    // beloont de doelfunctie precies het gedrag dat we niet willen.
+    const platesLeft = this.tables.reduce((n, t) => n + (t.dirtyPlates || 0), 0)
+                     + this.waiters.reduce((n, o) => n + (o.platesHeld || 0), 0);
     return Math.round(
       served * 12
       - avgWait * 3
       - m.impatient * 25
       - dist * 0.02
+      - platesLeft * 10
     );
   }
 
@@ -1783,6 +1790,7 @@ class SimulationEngine {
         platesDropped:      this.metrics.platesDropped      || 0,
         platesCleared:      this.metrics.platesCleared      || 0,
         clearingTrips:      this.metrics.clearingTrips      || 0,
+        platesLeft:         this.metrics.platesLeft         || 0,
       },
       tables: this.tables.map(t => ({ size: t.size, x: t.x, y: t.y, rotation: t.rotation, isFixed: !!t.isFixed })),
       fixedTables: this.fixedTables.map(t => ({ size: t.size, x: t.x, y: t.y, rotation: t.rotation || 0 })),
@@ -1923,6 +1931,7 @@ class SimulationEngine {
     // Onderscheid obers van gasten. Alleen oberroutes bepalen waiterDist, dus
     // alleen die mislukkingen kunnen de doelfunctie kunstmatig verlagen; een
     // gast die zijn stoel niet haalt is vervelend maar niet exploiteerbaar.
+    agent.routeFailed = !!path.failed;
     if (path.failed) this._countRouteFailure(agent);
   }
 
@@ -2400,7 +2409,17 @@ class SimulationEngine {
         case "IDLE": {
           // Find a table that's ordered but not served and isn't
           // already targeted by another waiter.
-          const claimed = new Set(this.waiters.map(o => o.targetTable && o.targetTable.id).filter(x => x != null));
+          // Alleen claims van obers die daadwerkelijk gaan bedienen tellen.
+          // Een afruimer die een tafel vasthoudt mag geen wachtende gast
+          // blokkeren -- drankjes hebben voorrang, en dat moet ook in de
+          // filter staan en niet alleen in de volgorde.
+          const CLEARING_STATES = ["CLEARING_WALK", "CLEARING", "RETURNING_PLATES"];
+          const claimed = new Set(this.waiters
+            .filter(o => o.targetTable && !CLEARING_STATES.includes(o.state))
+            .map(o => o.targetTable.id));
+          const clearClaimed = new Set(this.waiters
+            .filter(o => o.targetTable && CLEARING_STATES.includes(o.state))
+            .map(o => o.targetTable.id));
           const wanting = this.tables.filter(t =>
             t.ordered &&
             t.guests.some(g => g.state === "WAITING" && !g.served) &&
@@ -2408,7 +2427,7 @@ class SimulationEngine {
           if (!wanting.length) {
             // Niets te bedienen: dan afruimen. Drankjes hebben voorrang,
             // want daar staat een gast op te wachten; vieze borden niet.
-            this._maybeStartClearing(w, claimed);
+            this._maybeStartClearing(w, clearClaimed);
             break;
           }
           wanting.sort((a, b) => dist(a.centre(), w) - dist(b.centre(), w));
@@ -2420,6 +2439,16 @@ class SimulationEngine {
         }
 
         case "CLEARING_WALK":
+          // Een mislukte route laat de ober staan waar hij staat, en step()
+          // meldt dan meteen "aangekomen". Zonder deze toets ruimt hij een
+          // tafel af die hij nooit bereikt heeft, voor nul looplengte -- exact
+          // de vorm van de eerdere pathfinding-exploit.
+          if (w.routeFailed) {
+            if (w.targetTable) w.targetTable = null;
+            this._routeAgent(w, this.bar.dock);
+            w.state = w.platesHeld > 0 ? "RETURNING_PLATES" : "IDLE";
+            break;
+          }
           if (arrived) { w.state = "CLEARING"; w.timer = rndf(30, 45) * w.paceFactor; }
           break;
 
@@ -2448,6 +2477,13 @@ class SimulationEngine {
           break;
 
         case "RETURNING_PLATES":
+          if (w.routeFailed) {
+            // Kan de bar niet bereiken: borden blijven op de arm, tel ze niet
+            // als afgeruimd. De run wordt sowieso afgekeurd op
+            // waiterPathFailures.
+            w.state = "IDLE";
+            break;
+          }
           if (arrived) {
             this.metrics.platesCleared += w.platesHeld;
             this.metrics.clearingTrips++;
@@ -2741,7 +2777,12 @@ class SimulationEngine {
   //  rendering so BatchRunner can collect many results quickly.
   // -----------------------------------------------------------------------
   _batchStart(config) {
-    const seed = Math.floor(Math.random() * 1e9);
+    // Een meegegeven seed wint. Zonder dit is elke batch-run onherhaalbaar en
+    // is een gepaarde meting -- zelfde layout, zelfde gezelschap, één ding
+    // anders -- met de standaardgereedschappen onmogelijk.
+    const seed = Number.isFinite(config.seed)
+      ? config.seed
+      : Math.floor(Math.random() * 1e9);
     setSeed(seed);
     this.seed   = seed;
     this.config = config;
@@ -2753,7 +2794,7 @@ class SimulationEngine {
     this.runIndex += 1;
     this.guests   = [];
     this.waiters  = [];
-    this.metrics  = { totalServed: 0, totalLeft: 0, impatient: 0, waitSum: 0, waitSamples: 0, waiterDist: 0, score: 0, waiterPathFailures: 0, guestPathFailures: 0, buffetVisits: 0, buffetQueueSum: 0, buffetQueueSamples: 0, platesDropped: 0, platesCleared: 0, clearingTrips: 0, clipEvents: 0 };
+    this.metrics  = { totalServed: 0, totalLeft: 0, impatient: 0, waitSum: 0, waitSamples: 0, waiterDist: 0, score: 0, waiterPathFailures: 0, guestPathFailures: 0, buffetVisits: 0, buffetQueueSum: 0, buffetQueueSamples: 0, platesDropped: 0, platesCleared: 0, clearingTrips: 0, platesLeft: 0, clipEvents: 0 };
     this.spawnQueue = [];
     this.entrance = { x: 48, y: config.roomH - 54 };
     this.exit     = this.entrance;
@@ -2775,7 +2816,8 @@ class SimulationEngine {
     for (let i = 0; i < config.waiters; i++) {
       this.waiters.push(new Waiter(i,
         { x: this.bar.dock.x, y: this.bar.dock.y + i * 22 },
-        this.waiterColours[i % this.waiterColours.length]));
+        this.waiterColours[i % this.waiterColours.length],
+        this.population));
     }
     for (let i = 0; i < config.guests; i++) {
       this.spawnQueue.push({
@@ -2800,7 +2842,7 @@ class SimulationEngine {
     this.runIndex += 1;
     this.guests   = [];
     this.waiters  = [];
-    this.metrics  = { totalServed: 0, totalLeft: 0, impatient: 0, waitSum: 0, waitSamples: 0, waiterDist: 0, score: 0, waiterPathFailures: 0, guestPathFailures: 0, buffetVisits: 0, buffetQueueSum: 0, buffetQueueSamples: 0, platesDropped: 0, platesCleared: 0, clearingTrips: 0, clipEvents: 0 };
+    this.metrics  = { totalServed: 0, totalLeft: 0, impatient: 0, waitSum: 0, waitSamples: 0, waiterDist: 0, score: 0, waiterPathFailures: 0, guestPathFailures: 0, buffetVisits: 0, buffetQueueSum: 0, buffetQueueSamples: 0, platesDropped: 0, platesCleared: 0, clearingTrips: 0, platesLeft: 0, clipEvents: 0 };
     this.spawnQueue = [];
     this.entrance = { x: 48, y: config.roomH - 54 };
     this.exit     = this.entrance;
@@ -2827,7 +2869,8 @@ class SimulationEngine {
     for (let i = 0; i < config.waiters; i++) {
       this.waiters.push(new Waiter(i,
         { x: this.bar.dock.x, y: this.bar.dock.y + i * 22 },
-        this.waiterColours[i % this.waiterColours.length]));
+        this.waiterColours[i % this.waiterColours.length],
+        this.population));
     }
     for (let i = 0; i < config.guests; i++) {
       this.spawnQueue.push({
@@ -2851,6 +2894,8 @@ class SimulationEngine {
 
   _batchSnapshot() {
     this.metrics.waiterDist = this.waiters.reduce((s, w) => s + w.distance, 0);
+    this.metrics.platesLeft = this.tables.reduce((n, t) => n + (t.dirtyPlates || 0), 0)
+                            + this.waiters.reduce((n, o) => n + (o.platesHeld || 0), 0);
     this.metrics.score = this.efficiencyScore();
     return {
       seed: this.seed,
@@ -2886,6 +2931,7 @@ class SimulationEngine {
         platesDropped:      this.metrics.platesDropped      || 0,
         platesCleared:      this.metrics.platesCleared      || 0,
         clearingTrips:      this.metrics.clearingTrips      || 0,
+        platesLeft:         this.metrics.platesLeft         || 0,
       },
       tables: this.tables.map(t => ({
         size: t.size, x: t.x, y: t.y, rotation: t.rotation, w: t.w, h: t.h, seats: t.seats,
@@ -3051,6 +3097,7 @@ class BatchRunner {
         thirst:      parseFloat($("thirst").value),
         appetite:    parseFloat($("appetite").value),
         waiterSkill: parseFloat($("waiterSkill").value),
+        skillSpread: POPULATION_DEFAULTS.skillSpread,
       },
     };
   }

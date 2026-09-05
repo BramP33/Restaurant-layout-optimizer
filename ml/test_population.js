@@ -22,7 +22,6 @@ function summarise(page, seed, population) {
       tSmall: 0, tMedium: 6, tLarge: 2, partyType: "buffet",
       gridSize: 24, seed, population,
     };
-    engine._batchStart ? engine._batchStart(cfg, seed) : null;
     // Bouw de wereld op met deze seed zonder de hele avond te draaien: de
     // eigenschappen worden bij het aanmaken van de agents getrokken.
     setSeed(seed);
@@ -79,6 +78,55 @@ function summarise(page, seed, population) {
         `borden ${groen.plateCap[0]} (groen) tot ${top.plateCap[0]} (ervaren), drankjes ${groen.drinkCap[0]} tot ${top.drinkCap[0]}`);
   check("borden nooit boven de 7", Math.max(...top.plateCap) <= 7,
         `max ${Math.max(...top.plateCap)}`);
+
+  // ── Bereikt het profiel ook de obers via het ECHTE batch-pad? ──────────
+  //
+  // Dit is het gat dat de review vond: `_batchStart` en
+  // `_batchStartWithLayout` bouwden hun obers zonder profiel, dus
+  // `waiterSkill` deed in de hele ML-pipeline niets terwijl de interactieve
+  // modus wel werkte. Een test die zelf `new Waiter(...)` aanroept ziet dat
+  // niet -- die moet door de weg die de batch echt neemt.
+  const browser2 = await chromium.launch();
+  const page2 = await browser2.newPage();
+  await page2.goto(SIM);
+  await page2.waitForFunction(() => !!window.__engine, { timeout: 20000 });
+
+  const viaBatch = (skill) => page2.evaluate((skill) => {
+    const engine = window.__engine;
+    const tables = [
+      { size: "large",  x: 213, y: 351, rotation: 90 },
+      { size: "large",  x: 291, y: 388, rotation: 90 },
+      { size: "medium", x: 222, y: 34,  rotation: 90 },
+      { size: "medium", x: 277, y: 186, rotation: 90 },
+      { size: "medium", x: 404, y: 417, rotation: 90 },
+      { size: "medium", x: 432, y: 315, rotation: 90 },
+      { size: "medium", x: 454, y: 21,  rotation: 90 },
+      { size: "medium", x: 463, y: 152, rotation: 90 },
+    ];
+    const cfg = {
+      roomW: 640, roomH: 640, guests: 49, waiters: 3,
+      tSmall: 0, tMedium: 0, tLarge: 0, partyType: "buffet", gridSize: 24,
+      forcedLayout: tables,
+      population: { waiterSkill: skill, skillSpread: 0.01 },
+    };
+    engine._batchStart({ ...cfg, seed: 4242 });
+    return {
+      skills:   engine.waiters.map(w => +w.skill.toFixed(3)),
+      drinkCap: engine.waiters.map(w => w.capacity),
+      plateCap: engine.waiters.map(w => w.plateCapacity),
+    };
+  }, skill);
+
+  const groenB = await viaBatch(0.0);
+  const topB   = await viaBatch(1.0);
+  await browser2.close();
+
+  check("profiel bereikt de obers via het batch-pad",
+        !eq(groenB, topB),
+        `groen: skill ${groenB.skills[0]}, ${groenB.plateCap[0]} borden / ${groenB.drinkCap[0]} drankjes  |  ` +
+        `ervaren: skill ${topB.skills[0]}, ${topB.plateCap[0]} borden / ${topB.drinkCap[0]} drankjes`);
+  check("borden ook via het batch-pad nooit boven 7",
+        Math.max(...topB.plateCap, ...groenB.plateCap) <= 7);
 
   console.log(fail ? `\n${fail} controle(s) gefaald.` : "\nAlles in orde.");
   process.exit(fail ? 1 : 0);

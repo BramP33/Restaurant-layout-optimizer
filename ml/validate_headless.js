@@ -170,7 +170,7 @@ async function runValidation(page, layout, nSeeds) {
       if (result.error) {
         console.log(`FOUT: ${result.error}`);
       } else {
-        const scoreErr = (result.actual_score - result.predicted_score).toFixed(0);
+        const scoreErr = (result.actual_score - (result.predicted_score ?? 0)).toFixed(0);
         const distErr  = Math.round(result.actual_dist - result.predicted_dist).toLocaleString();
         console.log(`actueel score=${result.actual_score.toFixed(0)}  ` +
                     `dist=${Math.round(result.actual_dist).toLocaleString()} px  ` +
