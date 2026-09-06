@@ -42,11 +42,12 @@ const fs = require('fs'); const path = require('path');
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
   await page.goto('file://' + process.argv[3], { waitUntil: 'networkidle' });
-  const out = await page.evaluate(list => list.map(tables => {
+  const out = await page.evaluate(list => list.map(item => {
     const e = window.__engine;
-    e._batchStart({ roomW: 640, roomH: 640, guests: 49, waiters: 3,
+    const room = item.room;
+    e._batchStart({ room, roomW: room.w, roomH: room.h, guests: 49, waiters: 3,
       tSmall: 0, tMedium: 0, tLarge: 0, partyType: 'buffet', gridSize: 24,
-      forcedLayout: tables });
+      forcedLayout: item.tables });
     const r = e._layoutReach();
     return { valid: r.valid, unreach: r.unreachable, trapped: r.trappedWaiters };
   }), layouts);
@@ -60,6 +61,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default=str(ROOT / "restaurant-sim-merged.json"))
     ap.add_argument("--limit", type=int, default=0, help="0 = alles")
+    ap.add_argument("--rooms", type=int, default=0,
+                    help="aantal gevarieerde zalen; 0 = alleen de klassieke zaal")
     args = ap.parse_args()
 
     raw = json.loads(Path(args.data).read_text())
@@ -72,13 +75,34 @@ def main():
     layouts = [[t for t in tabs if t.get("size") != "custom"] for tabs in uniq.values()]
     if args.limit:
         layouts = layouts[:args.limit]
-    print(f"{len(runs):,} runs -> {len(layouts):,} unieke layouts")
+    import numpy as np
+    import rooms as rm
+    from optimize_layout import generate_batch
+
+    items = [{"room": rm.CLASSIC, "tables": tabs} for tabs in layouts]
+
+    if args.rooms:
+        # Gevarieerde zalen zijn de eigenlijke reden dat deze test bestaat: de
+        # spiegel is per definitie in orde op de zaal waarop hij geijkt is, en
+        # breekt pas zodra de geometrie verandert.
+        from optimize_layout import fit_table_mix
+        rng = np.random.default_rng(20260907)
+        for _ in range(args.rooms):
+            room = rm.make_room(rng)
+            types, _mix = fit_table_mix(room, rng)
+            batch, _ = generate_batch(12, rng, room=room, types=types)
+            for lay in batch[:6]:
+                items.append({"room": room,
+                              "tables": [t for t in lay if t.get("size") != "custom"]})
+        print(f"  + {args.rooms} gevarieerde zalen")
+
+    print(f"{len(runs):,} runs -> {len(items):,} te toetsen indelingen")
 
     # Het hulpscript moet naast node_modules staan, anders vindt require()
     # playwright niet: node zoekt vanaf de map van het bestand, niet vanaf cwd.
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
-        (tmp / "in.json").write_text(json.dumps(layouts))
+        (tmp / "in.json").write_text(json.dumps(items))
         runner = HERE / "_pathgrid_xcheck.tmp.js"
         runner.write_text(NODE_SNIPPET)
         try:
@@ -96,16 +120,18 @@ def main():
 
     agree = 0
     mismatches = []
-    for i, (tabs, v) in enumerate(zip(layouts, js)):
-        valid, unreach, trapped = pg.layout_valid(pg.build_blocked(tabs), tabs)
+    for i, (item, v) in enumerate(zip(items, js)):
+        tabs, room = item["tables"], item["room"]
+        valid, unreach, trapped = pg.layout_valid(
+            pg.build_blocked(tabs, room), tabs, room=room)
         if bool(valid) == bool(v["valid"]):
             agree += 1
         elif len(mismatches) < 10:
             mismatches.append((i, valid, v["valid"], unreach, v["unreach"], trapped, v["trapped"]))
 
-    dis = len(layouts) - agree
-    print(f"{len(layouts):,} layouts: {agree:,} eens, {dis:,} oneens "
-          f"({100 * dis / max(1, len(layouts)):.2f}%)")
+    dis = len(items) - agree
+    print(f"{len(items):,} indelingen: {agree:,} eens, {dis:,} oneens "
+          f"({100 * dis / max(1, len(items)):.2f}%)")
     for i, pv, jv, pu, ju, pt, jt in mismatches:
         print(f"  #{i}: py valid={pv} (onbereikbaar {pu}, opgesloten {pt}) "
               f"vs js valid={jv} (onbereikbaar {ju}, opgesloten {jt})")

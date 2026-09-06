@@ -22,13 +22,13 @@ from pathlib import Path
 HERE = Path(__file__).parent
 ROOT = HERE.parent          # data en modelbestanden staan in de repo-root
 
-# ── Constanten (zelfde als simulator) ────────────────────────────────────────
-ROOM_W = 640
-ROOM_H = 640
-BAR_DOCK_X    = ROOM_W - 110          # 530 (voor feature engineering)
-BAR_DOCK_Y    = 80                    # simulatie.html:1153 — bovenaan de bar, niet in het midden
-BAR_RECT      = (ROOM_W - 90, 50, 70, ROOM_H - 100)
-ENTRANCE_RECT = (0, ROOM_H - 90, 110, 90)
+# ── Constanten ───────────────────────────────────────────────────────────────
+# De zaal is geen constante meer: hij komt als `room` mee (ml/rooms.py). Deze
+# waarden beschrijven alleen nog de klassieke zaal, als terugval.
+from rooms import CLASSIC                                       # noqa: E402
+
+ROOM_W = CLASSIC["w"]
+ROOM_H = CLASSIC["h"]
 WALL_MARGIN   = 20
 MIN_CORR      = 50
 HALF_CORR     = 25
@@ -69,10 +69,14 @@ def _aabb_scalar(x, y, w, h, rot):
 #
 # Hit rate ~35–50%. Met N=100k per batch → ~40k geldige layouts per batch.
 
-def _collision_ok(ax, ay, aw, ah, placed):
+def _collision_ok(ax, ay, aw, ah, placed, room=CLASSIC):
     """(N,) bool — True als positie (ax,ay,aw,ah) vrij is van alle geplaatste items."""
-    bx, by, bw, bh = BAR_RECT
-    ex, ey, ew, eh = ENTRANCE_RECT
+    b = room["bar"]
+    bx, by, bw, bh = b["x"], b["y"], b["w"], b["h"]
+    e = room["entrance"]
+    # Loopruimte rond de deur: een blok van 110x90 rond het ingangspunt, zoals
+    # de `forbidden`-zone in simulatie.html.
+    ex, ey, ew, eh = e["x"] - 55, e["y"] - 45, 110, 90
     g, g2 = HALF_CORR, MIN_CORR
 
     ok = (~((ax < bx+bw+g) & (ax+aw+g > bx) & (ay < by+bh+g) & (ay+ah+g > by)) &
@@ -82,8 +86,52 @@ def _collision_ok(ax, ay, aw, ah, placed):
     return ok
 
 
-def generate_batch(N, rng, max_tries=200):
+def room_table_types(room):
+    """
+    Welke tafels horen in deze zaal?
+
+    Het aantal schaalt met de vrije vloer, want anders is elke vergelijking
+    tussen zalen scheef: een grote zaal met dezelfde acht tafels krijgt
+    onnodig lange looproutes, en een kleine zaal wint automatisch. Zie
+    rooms.table_mix_for().
+    """
+    import pathgrid as _pg
+    import rooms as _rooms
+    free = float((~_pg.build_blocked([], room)).sum()) * _pg.CELL ** 2
+    mix  = _rooms.table_mix_for(free)
+    return ["large"] * mix["tLarge"] + ["medium"] * mix["tMedium"], mix
+
+
+def fit_table_mix(room, rng, min_yield=0.25, probe_n=120):
+    """
+    Krimpt de tafelmix tot hij ook echt past.
+
+    De oppervlaktenorm gaat uit van vrije vloer, maar zegt niets over de VORM
+    daarvan. Een zaal met zes kolommen of een alkoof heeft dezelfde
+    oppervlakte en veel minder bruikbare aaneengesloten ruimte, en dan zakt de
+    plaatsingsopbrengst naar nul. Dus: begin bij wat de norm zegt en haal er
+    tafels af tot het lukt.
+    """
+    types, mix = room_table_types(room)
+    while len(types) > 3:
+        batch, _ = generate_batch(probe_n, rng, room=room, types=types)
+        if len(batch) / probe_n >= min_yield:
+            break
+        # Eerst de middelgrote weghalen; de grote tafels dragen de meeste
+        # zitplaatsen en houden de verhouding herkenbaar.
+        if "medium" in types:
+            types.remove("medium")
+        else:
+            types.remove("large")
+    seats = 6 * types.count("large") + 4 * types.count("medium")
+    return types, {"tLarge": types.count("large"), "tMedium": types.count("medium"),
+                   "tSmall": 0, "seats": seats,
+                   "guests": int(round(seats * 49 / 36))}
+
+
+def generate_batch(N, rng, max_tries=200, room=CLASSIC, types=None):
     """Genereert tot N geldige layouts (sequentieel-vectorized)."""
+    VARIABLE_TYPES = types if types is not None else room_table_types(room)[0]
     T     = len(VARIABLE_TYPES)
     rot90 = rng.integers(0, 2, N).astype(bool)   # (N,) één rotatie per layout
 
@@ -96,9 +144,23 @@ def generate_batch(N, rng, max_tries=200):
     # genoeg om langs een wachtende rij te lopen, en de vuistregel uit de
     # cateringpraktijk is minimaal ~1,2 m.
     WALKWAY_PX = 36
-    _bx, _by, _bw, _bh = pg.BUFFET_RECT
-    placed = [(np.full(N, _bx - 8, np.float32), np.full(N, _by - 8, np.float32),
-               np.full(N, _bw + 8 + WALKWAY_PX, np.float32), np.full(N, _bh + 16, np.float32))]
+    _bf = room.get("buffet")
+    placed = []
+    if _bf:
+        # Looppad aan de ZAALkant van de lijn, niet altijd rechts.
+        wall = _bf.get("wall", "links")
+        bx0, by0 = _bf["x"] - 8, _bf["y"] - 8
+        bw0, bh0 = _bf["w"] + 16, _bf["h"] + 16
+        if wall == "links":     bw0 += WALKWAY_PX
+        elif wall == "rechts":  bx0 -= WALKWAY_PX; bw0 += WALKWAY_PX
+        elif wall == "boven":   bh0 += WALKWAY_PX
+        else:                   by0 -= WALKWAY_PX; bh0 += WALKWAY_PX
+        placed.append((np.full(N, bx0, np.float32), np.full(N, by0, np.float32),
+                       np.full(N, bw0, np.float32), np.full(N, bh0, np.float32)))
+    # Kolommen, podia en dichtgezette hoeken.
+    for blk in room.get("blocks", []):
+        placed.append((np.full(N, blk["x"] - 8, np.float32), np.full(N, blk["y"] - 8, np.float32),
+                       np.full(N, blk["w"] + 16, np.float32), np.full(N, blk["h"] + 16, np.float32)))
     # FIXED_TABLES staan hier bewust NIET meer bij. Die drie "custom" tafels
     # komen nooit op de vloer -- validate_headless.js filtert ze weg en
     # simulatie.html plaatst ze alleen uit localStorage -- dus ze mijden was
@@ -116,8 +178,8 @@ def generate_batch(N, rng, max_tries=200):
         ew_arr = np.where(rot90, h, w).astype(np.float32)   # (N,)
         eh_arr = np.where(rot90, w, h).astype(np.float32)
 
-        x_hi   = (ROOM_W - WALL_MARGIN) - ew_arr   # bovengrens x
-        y_hi   = (ROOM_H - WALL_MARGIN) - eh_arr
+        x_hi   = (room["w"] - WALL_MARGIN) - ew_arr   # bovengrens x
+        y_hi   = (room["h"] - WALL_MARGIN) - eh_arr
         # Geen rechterkant-bias meer. Die stond op 60% en bakte een eerdere
         # conclusie in: als de sampler zelden links kijkt, wordt een beter
         # optimum links per definitie nooit gevonden, en elke dataset die
@@ -135,7 +197,7 @@ def generate_batch(N, rng, max_tries=200):
             ys   = y_lo + rng.random(N).astype(np.float32) * (y_hi - y_lo)
             ax   = np.where(rot90, xs + hdw, xs)
             ay   = np.where(rot90, ys + hdh, ys)
-            ok   = _collision_ok(ax, ay, ew_arr, eh_arr, placed)
+            ok   = _collision_ok(ax, ay, ew_arr, eh_arr, placed, room)
             newly = need & ok
             result_xs[newly, t_idx] = xs[newly]
             result_ys[newly, t_idx] = ys[newly]
@@ -169,12 +231,12 @@ def generate_batch(N, rng, max_tries=200):
 
 # ── Feature extractie (zelfde als train_surrogate.py) ────────────────────────
 
-def extract_features(tables, frontier=False):
+def extract_features(tables, frontier=False, room=CLASSIC):
     from train_surrogate import extract_features_from_list, extract_frontier_features
     var = [t for t in tables if t["size"] != "custom"]
     var.sort(key=lambda t: (-t["w"], t["x"], t["y"]))
-    return (extract_frontier_features(var) if frontier
-            else extract_features_from_list(var))
+    return (extract_frontier_features(var, room) if frontier
+            else extract_features_from_list(var, room))
 
 
 def pad(rows, feat_len):
@@ -184,7 +246,7 @@ def pad(rows, feat_len):
 
 # ── Scoring helper (duck-typed voor RF én GNN) ────────────────────────────────
 
-def _score_layouts(model, feat_len, layouts, frontier=False):
+def _score_layouts(model, feat_len, layouts, frontier=False, room=CLASSIC):
     """
     Scoort layouts met RF of GNN — transparant voor de aanroeper.
 
@@ -216,12 +278,12 @@ def _score_layouts(model, feat_len, layouts, frontier=False):
         # metadata en staan niet op de vloer (zie pathgrid.py). Ze wel
         # meerekenen zou indelingen afkeuren die in de simulatie prima lopen.
         var = [t for t in layout if t.get("size") != "custom"]
-        ok, _unreachable, _trapped = pg.layout_valid(pg.build_blocked(var), var)
-        if ok and pg.overlaps_buffet(var):
+        ok, _unreachable, _trapped = pg.layout_valid(pg.build_blocked(var, room), var, room=room)
+        if ok and pg.overlaps_buffet(var, room):
             ok = False          # bereikbaar maar fysiek onmogelijk
         if ok:
             keep.append(i)
-            rows.append(extract_features(layout, frontier=frontier))
+            rows.append(extract_features(layout, frontier=frontier, room=room))
     if keep:
         scores[keep] = model.predict(pad(rows, feat_len))
     return scores
@@ -229,7 +291,7 @@ def _score_layouts(model, feat_len, layouts, frontier=False):
 
 # ── Random search ─────────────────────────────────────────────────────────────
 
-def random_search(model, feat_len, n_candidates, rng, batch=50_000):
+def random_search(model, feat_len, n_candidates, rng, batch=50_000, room=CLASSIC):
     print(f"Fase 1 — random search ({n_candidates:,} kandidaten)…")
     t0 = time.time()
 
@@ -238,13 +300,13 @@ def random_search(model, feat_len, n_candidates, rng, batch=50_000):
 
     while generated < n_candidates:
         size             = min(batch, n_candidates - generated)
-        layouts, hit     = generate_batch(size, rng)
+        layouts, hit     = generate_batch(size, rng, room=room)
         generated       += size
 
         if not layouts:
             continue
 
-        scores    = _score_layouts(model, feat_len, layouts)
+        scores    = _score_layouts(model, feat_len, layouts, room=room)
         keep      = [i for i, sc in enumerate(scores) if np.isfinite(sc)]
         rejected += len(layouts) - len(keep)
         all_layouts.extend(layouts[i] for i in keep)
@@ -264,7 +326,7 @@ def random_search(model, feat_len, n_candidates, rng, batch=50_000):
 # ── Local refinement ──────────────────────────────────────────────────────────
 
 def local_refine(model, feat_len, candidates, scores, top_k, n_rounds, rng,
-                 frontier=False):
+                 frontier=False, room=CLASSIC):
     if not candidates:
         print("Geen kandidaten voor refinement.")
         return candidates, scores
@@ -280,7 +342,7 @@ def local_refine(model, feat_len, candidates, scores, top_k, n_rounds, rng,
     # vergelijkt de acceptatietoets hieronder appels met peren en wordt een
     # perturbatie aangenomen of verworpen op een schaalverschil.
     if frontier and pool:
-        pscore = list(_score_layouts(model, feat_len, pool, frontier=True))
+        pscore = list(_score_layouts(model, feat_len, pool, frontier=True, room=room))
 
     for _ in range(n_rounds):
         perturbed, origins = [], []
@@ -296,7 +358,7 @@ def local_refine(model, feat_len, candidates, scores, top_k, n_rounds, rng,
             ew     = td["h"] if r % 180 == 90 else td["w"]
             eh     = td["w"] if r % 180 == 90 else td["h"]
             if (nx < WALL_MARGIN or ny < WALL_MARGIN or
-                    nx + ew > ROOM_W - WALL_MARGIN or ny + eh > ROOM_H - WALL_MARGIN):
+                    nx + ew > room["w"] - WALL_MARGIN or ny + eh > room["h"] - WALL_MARGIN):
                 continue
             new_layout      = [dict(t2) for t2 in layout]
             new_layout[idx] = {**t, "x": nx, "y": ny}
@@ -305,7 +367,7 @@ def local_refine(model, feat_len, candidates, scores, top_k, n_rounds, rng,
 
         if not perturbed:
             continue
-        new_sc = _score_layouts(model, feat_len, perturbed, frontier=frontier)
+        new_sc = _score_layouts(model, feat_len, perturbed, frontier=frontier, room=room)
         for k, ci in enumerate(origins):
             if new_sc[k] < pscore[ci]:
                 pool[ci]   = perturbed[k]
@@ -362,14 +424,15 @@ def gradient_search(gnn_model, candidates, scores, top_k=10, steps=500):
 
 # ── Export ────────────────────────────────────────────────────────────────────
 
-def export(layouts, pred_scores, out_path, top_n):
+def export(layouts, pred_scores, out_path, top_n, room=CLASSIC):
     results = []
     for rank, (layout, sc) in enumerate(zip(layouts[:top_n], pred_scores[:top_n])):
         results.append({
             "rank": rank + 1,
             "predicted_waiterDist": round(float(sc)),
             "predicted_score":      round(-float(sc) * 0.02 + 421 * 12, 1),
-            "config": {"roomW": ROOM_W, "roomH": ROOM_H, "guests": 49, "waiters": 3,
+            "config": {"room": room, "roomW": room["w"], "roomH": room["h"],
+                       "guests": 49, "waiters": 3,
                        "tSmall": 0, "tMedium": 6, "tLarge": 2, "partyType": "buffet"},
             "tables": layout,
         })
@@ -384,17 +447,29 @@ def export(layouts, pred_scores, out_path, top_n):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def parse_args():
-    a, cfg = sys.argv[1:], {"top": 10, "candidates": 200_000, "refine_top": 50, "refine_rounds": 500}
+    a, cfg = sys.argv[1:], {"top": 10, "candidates": 200_000, "refine_top": 50,
+                            "refine_rounds": 500, "room_seed": None, "room_kind": None}
     i = 0
     while i < len(a):
         if   a[i] == "--top"        and i+1 < len(a): cfg["top"]        = int(a[i+1]); i += 2
         elif a[i] == "--candidates" and i+1 < len(a): cfg["candidates"] = int(a[i+1]); i += 2
+        elif a[i] == "--room-seed"  and i+1 < len(a): cfg["room_seed"] = int(a[i+1]); i += 2
+        elif a[i] == "--room-kind"  and i+1 < len(a): cfg["room_kind"] = a[i+1]; i += 2
         else: i += 1
     return cfg
 
 
 if __name__ == "__main__":
     cfg = parse_args()
+    # Welke zaal? Zonder vlag de klassieke, zodat oude aanroepen niets merken.
+    import rooms as _rooms
+    if cfg.get("room_seed") is not None:
+        _rng_room = np.random.default_rng(cfg["room_seed"])
+        room = _rooms.make_room(_rng_room, cfg.get("room_kind"))
+        print(f"Zaal: {room['kind']} {room['w']}x{room['h']}, "
+              f"bar {room['bar_wall']}, {len(room['blocks'])} blokken")
+    else:
+        room = CLASSIC
     rng = np.random.default_rng(42)
 
     # ── RF laden voor hoofdoptimalisatie ──
@@ -432,7 +507,7 @@ if __name__ == "__main__":
     # uren. De verfijning draait op het frontier-model: daar zitten we in de
     # kopgroep, en juist daar tillen die features de rangschikking omhoog
     # (rho 0,392 -> 0,427 tegen een achtergehouden seed).
-    layouts, scores = random_search(model, feat_len, cfg["candidates"], rng)
+    layouts, scores = random_search(model, feat_len, cfg["candidates"], rng, room=room)
 
     if model_frontier is not None:
         print(f"\nFrontier-model: {feat_len_frontier} features "
@@ -441,11 +516,11 @@ if __name__ == "__main__":
                                        layouts, scores,
                                        top_k=cfg["refine_top"],
                                        n_rounds=cfg["refine_rounds"], rng=rng,
-                                       frontier=True)
+                                       frontier=True, room=room)
     else:
         layouts, scores = local_refine(model, feat_len, layouts, scores,
                                        top_k=cfg["refine_top"],
-                                       n_rounds=cfg["refine_rounds"], rng=rng)
+                                       n_rounds=cfg["refine_rounds"], rng=rng, room=room)
 
     # ── Gradiëntoptimalisatie met GNN (als beschikbaar en goed genoeg) ──
     if gnn_model is not None:
@@ -453,4 +528,4 @@ if __name__ == "__main__":
                                           top_k=min(5, len(layouts)),
                                           steps=150)
 
-    export(layouts, scores, ROOT / "optimizer-results.json", top_n=cfg["top"])
+    export(layouts, scores, ROOT / "optimizer-results.json", top_n=cfg["top"], room=room)

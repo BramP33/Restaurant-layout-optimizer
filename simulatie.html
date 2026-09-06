@@ -501,6 +501,55 @@
 //  plus doorvoercijfers uit de cateringpraktijk: 30-50 gasten per uur per
 //  station (~72-120 s per gast), piek 30-45 min na aanvang, 1,3-1,5 passes per
 //  gast waarvan 30-40% een tweede ronde.
+// Bouwt de zaal uit de config. Staat er een `room` in, dan wordt die
+// gebruikt zoals hij is -- die komt uit ml/rooms.py, de enige generator.
+// Zonder `room` valt hij terug op de klassieke zaal, zodat de browserdemo en
+// alle bestaande data ongewijzigd blijven werken.
+//
+// Deze functie bestaat omdat bar, ingang en buffet eerder in DRIE kopieën van
+// de engine-initialisatie stonden. Dat is hier al twee keer misgegaan, en met
+// verplaatsbare meubels zou het gegarandeerd opnieuw gebeuren.
+// Waar ober `i` begint: naast elkaar LANGS de bar. Altijd in y stapelen zet
+// bij een bar tegen de onder- of bovenwand de tweede en derde ober middenin
+// het meubel -- geen gedeelde loopvloer, en dan wordt elke indeling ongeldig
+// verklaard. Moet gelijk zijn aan waiter_spawn() in ml/pathgrid.py.
+function waiterSpawn(bar, i) {
+  return bar.h >= bar.w
+    ? { x: bar.dock.x, y: bar.dock.y + i * 22 }
+    : { x: bar.dock.x + i * 22, y: bar.dock.y };
+}
+
+function buildRoom(config) {
+  if (config.room) {
+    const r = config.room;
+    // Een extern beschreven zaal hoeft alleen de geometrie te leveren. Gedrag
+    // dat de simulator zelf bepaalt -- hoeveel plekken er aan de lijn zijn en
+    // hoe lang opscheppen duurt -- krijgt hier zijn standaardwaarden. Zonder
+    // die vangnetten crasht de gasttoestandsmachine op een ontbrekend veld,
+    // en dan levert een hele batch stilzwijgend niets op.
+    const buffet = r.buffet
+      ? { slots: 3, dwellRange: [45, 90], wall: "links", ...r.buffet }
+      : null;
+    return {
+      w: r.w, h: r.h,
+      bar: r.bar,
+      buffet,
+      entrance: r.entrance,
+      blocks: r.blocks || [],
+      kind: r.kind || "extern",
+    };
+  }
+  const w = config.roomW, h = config.roomH;
+  return {
+    w, h,
+    bar: { x: w - 90, y: 50, w: 70, h: h - 100, dock: { x: w - 110, y: 80 } },
+    buffet: makeBuffet(config),
+    entrance: { x: 48, y: h - 54 },
+    blocks: [],
+    kind: "rechthoek",
+  };
+}
+
 function makeBuffet(config) {
   if (!(PARTY_TYPES[config.partyType] || {}).hasBuffet) return null;
   const h = Math.max(160, config.roomH - 340);
@@ -514,10 +563,14 @@ function makeBuffet(config) {
 // De aanlooppunten liggen op de zaalkant (rechts van de lijn), niet ertegenaan:
 // een punt binnen het obstakel is onbereikbaar voor de router.
 function buffetSlotPoints(buffet) {
-  const pts = [];
+  if (!buffet) return [];
+  const pts = [], gap = 26, wall = buffet.wall || "links";
   for (let i = 0; i < buffet.slots; i++) {
-    const frac = (i + 0.5) / buffet.slots;
-    pts.push({ x: buffet.x + buffet.w + 26, y: buffet.y + frac * buffet.h });
+    const f = (i + 0.5) / buffet.slots;
+    if (wall === "links")       pts.push({ x: buffet.x + buffet.w + gap, y: buffet.y + f * buffet.h });
+    else if (wall === "rechts") pts.push({ x: buffet.x - gap,            y: buffet.y + f * buffet.h });
+    else if (wall === "boven")  pts.push({ x: buffet.x + f * buffet.w,   y: buffet.y + buffet.h + gap });
+    else                        pts.push({ x: buffet.x + f * buffet.w,   y: buffet.y - gap });
   }
   return pts;
 }
@@ -1431,17 +1484,14 @@ class SimulationEngine {
     };
     this.spawnQueue = [];               // pre-baked guest spawn schedule
 
-    this.entrance = { x: 48, y: config.roomH - 54 };
-    this.exit = this.entrance;          // same door for in and out
-    // The bar is a fixed wide pickup zone on the right wall — drinks
-    // come off the bar within this rectangle and waiters dock at its
-    // midpoint.
-    this.bar = {
-      x: config.roomW - 90, y: 50,
-      w: 70, h: config.roomH - 100,
-      dock: { x: config.roomW - 110, y: 80 },
-    };
-    this.buffet = makeBuffet(config);
+    this.room     = buildRoom(config);
+    this.entrance = this.room.entrance;
+    this.exit     = this.entrance;      // same door for in and out
+    this.bar      = this.room.bar;
+    this.buffet   = this.room.buffet;
+    this.blocks   = this.room.blocks;
+    this.canvas.width  = this.room.w;
+    this.canvas.height = this.room.h;
     this.population = { ...POPULATION_DEFAULTS, ...(config.population || {}) };
     this.buffetBusy = this.buffet ? new Array(this.buffet.slots).fill(null) : [];
 
@@ -1463,12 +1513,13 @@ class SimulationEngine {
     // regenerated every run because a new table layout means a new blocked
     // grid. Both guests and waiters use this same map, which keeps their
     // movement constraints consistent.
-    this.navigator = new PathNavigator(config.roomW, config.roomH, this.tables, this.bar, this.obstacles, this.buffet);
+    this.navigator = new PathNavigator(this.room.w, this.room.h, this.tables, this.bar,
+      [...this.obstacles, ...this.blocks], this.buffet);
     this._layoutReachCache = null;   // nieuwe layout -> bereikbaarheid opnieuw bepalen
 
     // Spawn waiters at the bar dock with distinct colours.
     for (let i = 0; i < config.waiters; i++) {
-      this.waiters.push(new Waiter(i, { x: this.bar.dock.x, y: this.bar.dock.y + i * 22 },
+      this.waiters.push(new Waiter(i, waiterSpawn(this.bar, i),
                                    this.waiterColours[i % this.waiterColours.length],
                                    this.population));
     }
@@ -1582,7 +1633,17 @@ class SimulationEngine {
     // staan, anders is de rij niet te bereiken.
     if (this.buffet) {
       const bf = this.buffet;
-      forbidden.push({ x: bf.x - 8, y: bf.y - 8, w: bf.w + 8 + 60, h: bf.h + 16 });
+      const wall = bf.wall || "links";
+      // Het looppad hoort aan de ZAALkant van de lijn, niet altijd rechts.
+      const walk = 60;
+      if (wall === "links")       forbidden.push({ x: bf.x - 8, y: bf.y - 8, w: bf.w + 8 + walk, h: bf.h + 16 });
+      else if (wall === "rechts") forbidden.push({ x: bf.x - 8 - walk, y: bf.y - 8, w: bf.w + 8 + walk, h: bf.h + 16 });
+      else if (wall === "boven")  forbidden.push({ x: bf.x - 8, y: bf.y - 8, w: bf.w + 16, h: bf.h + 8 + walk });
+      else                        forbidden.push({ x: bf.x - 8, y: bf.y - 8 - walk, w: bf.w + 16, h: bf.h + 8 + walk });
+    }
+    // Kolommen, podia en uitgesneden hoeken.
+    for (const b of this.blocks) {
+      forbidden.push({ x: b.x - 8, y: b.y - 8, w: b.w + 16, h: b.h + 16 });
     }
 
     for (const size of declare) {
@@ -1671,7 +1732,7 @@ class SimulationEngine {
     const nav = this.navigator;
     const { label, sizes } = nav.components();
     const spawnCount = Math.max(1, (this.config && this.config.waiters) || this.waiters.length);
-    const spawn = i => ({ x: this.bar.dock.x, y: this.bar.dock.y + i * 22 });
+    const spawn = i => waiterSpawn(this.bar, i);
 
     // Alle obers moeten in EEN gezamenlijke loopvloer terechtkunnen. Een ober
     // die in een nis van twee cellen staat legt nul afstand af, en dat maakt
@@ -2649,6 +2710,14 @@ class SimulationEngine {
       });
     }
 
+    // Kolommen, podia en dichtgezette hoeken.
+    for (const b of this.blocks) {
+      ctx.fillStyle = "#15151a";
+      ctx.fillRect(b.x, b.y, b.w, b.h);
+      ctx.strokeStyle = "#33333d"; ctx.lineWidth = 2;
+      ctx.strokeRect(b.x, b.y, b.w, b.h);
+    }
+
     // Bar zone on the right wall.
     ctx.fillStyle = "#1f1610";
     roundRect(ctx, this.bar.x, this.bar.y, this.bar.w, this.bar.h, 6); ctx.fill();
@@ -2660,7 +2729,7 @@ class SimulationEngine {
 
     // Entrance marker — a gap in the wall with a labelled threshold.
     ctx.fillStyle = "#0c0c12";
-    ctx.fillRect(0, H - 70, 30, 50);
+    ctx.fillRect(Math.max(0, this.entrance.x - 15), Math.max(0, this.entrance.y - 25), 30, 50);
     ctx.strokeStyle = "#3a3a48"; ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.moveTo(0, H - 70); ctx.lineTo(30, H - 70);
@@ -2806,14 +2875,14 @@ class SimulationEngine {
     this.waiters  = [];
     this.metrics  = { totalServed: 0, totalLeft: 0, impatient: 0, waitSum: 0, waitSamples: 0, waiterDist: 0, score: 0, waiterPathFailures: 0, guestPathFailures: 0, buffetVisits: 0, buffetQueueSum: 0, buffetQueueSamples: 0, platesDropped: 0, platesCleared: 0, clearingTrips: 0, platesLeft: 0, clipEvents: 0 };
     this.spawnQueue = [];
-    this.entrance = { x: 48, y: config.roomH - 54 };
+    this.room     = buildRoom(config);
+    this.entrance = this.room.entrance;
     this.exit     = this.entrance;
-    this.bar = {
-      x: config.roomW - 90, y: 50,
-      w: 70, h: config.roomH - 100,
-      dock: { x: config.roomW - 110, y: 80 },
-    };
-    this.buffet = makeBuffet(config);
+    this.bar      = this.room.bar;
+    this.buffet   = this.room.buffet;
+    this.blocks   = this.room.blocks;
+    this.canvas.width  = this.room.w;
+    this.canvas.height = this.room.h;
     this.population = { ...POPULATION_DEFAULTS, ...(config.population || {}) };
     this.buffetBusy = this.buffet ? new Array(this.buffet.slots).fill(null) : [];
     for (let t = 0; t < 5; t++) {
@@ -2821,11 +2890,12 @@ class SimulationEngine {
       if (!this.layoutError) break;
     }
     if (this.layoutError) return false;
-    this.navigator = new PathNavigator(config.roomW, config.roomH, this.tables, this.bar, this.obstacles, this.buffet);
+    this.navigator = new PathNavigator(this.room.w, this.room.h, this.tables, this.bar,
+      [...this.obstacles, ...this.blocks], this.buffet);
     this._layoutReachCache = null;   // nieuwe layout -> bereikbaarheid opnieuw bepalen
     for (let i = 0; i < config.waiters; i++) {
       this.waiters.push(new Waiter(i,
-        { x: this.bar.dock.x, y: this.bar.dock.y + i * 22 },
+        waiterSpawn(this.bar, i),
         this.waiterColours[i % this.waiterColours.length],
         this.population));
     }
@@ -2854,14 +2924,14 @@ class SimulationEngine {
     this.waiters  = [];
     this.metrics  = { totalServed: 0, totalLeft: 0, impatient: 0, waitSum: 0, waitSamples: 0, waiterDist: 0, score: 0, waiterPathFailures: 0, guestPathFailures: 0, buffetVisits: 0, buffetQueueSum: 0, buffetQueueSamples: 0, platesDropped: 0, platesCleared: 0, clearingTrips: 0, platesLeft: 0, clipEvents: 0 };
     this.spawnQueue = [];
-    this.entrance = { x: 48, y: config.roomH - 54 };
+    this.room     = buildRoom(config);
+    this.entrance = this.room.entrance;
     this.exit     = this.entrance;
-    this.bar = {
-      x: config.roomW - 90, y: 50,
-      w: 70, h: config.roomH - 100,
-      dock: { x: config.roomW - 110, y: 80 },
-    };
-    this.buffet = makeBuffet(config);
+    this.bar      = this.room.bar;
+    this.buffet   = this.room.buffet;
+    this.blocks   = this.room.blocks;
+    this.canvas.width  = this.room.w;
+    this.canvas.height = this.room.h;
     this.population = { ...POPULATION_DEFAULTS, ...(config.population || {}) };
     this.buffetBusy = this.buffet ? new Array(this.buffet.slots).fill(null) : [];
     // Reset stateful fields on each table (geometry/positions unchanged).
@@ -2874,11 +2944,12 @@ class SimulationEngine {
       t.drinksDelivered = 0;
     }
     this.tables = tables;
-    this.navigator = new PathNavigator(config.roomW, config.roomH, this.tables, this.bar, this.obstacles, this.buffet);
+    this.navigator = new PathNavigator(this.room.w, this.room.h, this.tables, this.bar,
+      [...this.obstacles, ...this.blocks], this.buffet);
     this._layoutReachCache = null;   // nieuwe layout -> bereikbaarheid opnieuw bepalen
     for (let i = 0; i < config.waiters; i++) {
       this.waiters.push(new Waiter(i,
-        { x: this.bar.dock.x, y: this.bar.dock.y + i * 22 },
+        waiterSpawn(this.bar, i),
         this.waiterColours[i % this.waiterColours.length],
         this.population));
     }
@@ -3440,7 +3511,8 @@ class BatchRunner {
     engine.waiters = [];
     engine.spawnQueue = [];
     engine.tables = engine.generateLayout();
-    engine.navigator = new PathNavigator(engine.config.roomW, engine.config.roomH, engine.tables, engine.bar, engine.obstacles, engine.buffet);
+    engine.navigator = new PathNavigator(engine.room.w, engine.room.h, engine.tables, engine.bar,
+      [...engine.obstacles, ...(engine.blocks || [])], engine.buffet);
     engine._layoutReachCache = null;
   }
 

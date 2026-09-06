@@ -19,6 +19,7 @@ Gebruik:
 
 import argparse
 import json
+import math
 
 import numpy as np
 from pathlib import Path
@@ -29,6 +30,7 @@ from sklearn.model_selection import GroupKFold
 from scipy.stats import spearmanr
 
 import pathgrid as pg
+from rooms import CLASSIC
 from log_target import LogTargetModel
 import xgboost as xgb  # type: ignore
 import joblib
@@ -73,10 +75,27 @@ def _find_data(explicit=None):
     raise FileNotFoundError("Geen dataset gevonden.")
 
 
-def layout_key(variable):
-    """Stabiele sleutel per indeling — identieke layouts krijgen dezelfde sleutel."""
-    return tuple(sorted((round(t["x"], 1), round(t["y"], 1), t["size"], t["rotation"])
-                        for t in variable))
+def run_room(run):
+    """De zaal waarin deze run gedraaid is; ontbreekt hij, dan de klassieke."""
+    return (run.get("config") or {}).get("room") or CLASSIC
+
+
+def layout_key(variable, room=CLASSIC):
+    """
+    Stabiele sleutel per indeling.
+
+    De ZAAL hoort erin. Zonder dat zijn identieke tafelposities in twee
+    verschillende zalen dezelfde sleutel, worden ze samengevoegd tot een rij,
+    en middelt de dedupe twee onvergelijkbare metingen door elkaar.
+    """
+    b, f = room["bar"], room.get("buffet")
+    rk = (room.get("kind", "?"), room["w"], room["h"],
+          b["x"], b["y"], b["w"], b["h"],
+          (f["x"], f["y"], f["w"], f["h"]) if f else None,
+          room["entrance"]["x"], room["entrance"]["y"],
+          tuple(sorted((x["x"], x["y"], x["w"], x["h"]) for x in room.get("blocks", []))))
+    return (rk, tuple(sorted((round(t["x"], 1), round(t["y"], 1), t["size"], t["rotation"])
+                             for t in variable)))
 
 
 def load_data(path):
@@ -102,7 +121,8 @@ def load_data(path):
             continue
 
         variable.sort(key=lambda t: (-t["w"], t["x"], t["y"]))
-        key = layout_key(variable)
+        room = run_room(run)
+        key  = layout_key(variable, room)
         m   = run["metrics"]
 
         # Er zitten twee formaten door elkaar in de dataset:
@@ -116,7 +136,7 @@ def load_data(path):
         #     een ander aantal seeds opnieuw gevalideerd wordt.
         weight = n_seeds if "runs" in run else 1
 
-        a = agg.setdefault(key, {"variable": variable, "dist": 0.0,
+        a = agg.setdefault(key, {"variable": variable, "room": room, "dist": 0.0,
                                  "score": 0.0, "wait": 0.0, "n_seeds": 0})
         a["dist"]    += m["waiterDist"] * weight
         a["score"]   += m["score"]      * weight
@@ -128,8 +148,8 @@ def load_data(path):
     X_rows, y_rows, w_rows, meta_rows, var_rows = [], [], [], [], []
     for a in agg.values():
         n = a["n_seeds"]
-        X_rows.append(extract_features_from_list(a["variable"]))
-        var_rows.append(a["variable"])
+        X_rows.append(extract_features_from_list(a["variable"], a["room"]))
+        var_rows.append((a["variable"], a["room"]))
         y_rows.append(a["dist"] / n)
         w_rows.append(n)
         meta_rows.append({
@@ -147,94 +167,145 @@ def load_data(path):
     return X, y, w, max_len, meta_rows, var_rows
 
 
-def extract_features_from_list(variable):
-    """Rijke feature-extractie uit een gesorteerde lijst van variabele tafels."""
-    n   = len(variable)
-    cx  = np.array([t["x"] for t in variable])
-    cy  = np.array([t["y"] for t in variable])
-    cw  = np.array([t["w"] for t in variable])
-    ch  = np.array([t["h"] for t in variable])
+N_TABLE_SLOTS = 8      # vaste lengte voor per-tafel blokken
 
-    # Positie + afmetingen per tafel (raw)
+
+def room_features(room):
+    """
+    Beschrijft de ZAAL zelf, dimensieloos waar het kan.
+
+    Zonder deze features kan het model onmogelijk generaliseren: alle andere
+    features beschrijven waar de tafels staan, en dat betekent iets anders in
+    een smalle zaal met kolommen dan in een vierkante lege zaal.
+    """
+    w, h = float(room["w"]), float(room["h"])
+    diag = math.hypot(w, h)
+    dock = room["bar"]["dock"]
+    ent  = room["entrance"]
+    blocks = room.get("blocks", [])
+    block_area = sum(b["w"] * b["h"] for b in blocks)
+    bar = room["bar"]
+    buf = room.get("buffet")
+    return [
+        w / 1000.0, h / 1000.0,                 # schaal
+        w / h,                                  # zijverhouding
+        diag / 1000.0,
+        (w * h) / 1e6,                          # oppervlak
+        block_area / (w * h),                   # aandeel vloer weggenomen
+        float(len(blocks)),
+        dock["x"] / w, dock["y"] / h,           # waar de bediening vandaan komt
+        ent["x"] / w, ent["y"] / h,             # waar de gasten binnenkomen
+        (bar["w"] * bar["h"]) / (w * h),
+        1.0 if buf else 0.0,
+        (buf["x"] + buf["w"] / 2) / w if buf else 0.5,
+        (buf["y"] + buf["h"] / 2) / h if buf else 0.5,
+    ]
+
+
+def extract_features_from_list(variable, room=CLASSIC):
+    """
+    Feature-extractie uit een gesorteerde lijst van variabele tafels.
+
+    Alles wat een lengte in pixels is wordt gedeeld door de diagonaal van de
+    zaal, en alle posities door de zaalmaten. Zonder die normalisatie betekent
+    x = 400 iets totaal anders in een zaal van 520 breed dan in een van 900, en
+    dan leert het model de zaal in plaats van de indeling.
+
+    Per-tafel blokken hebben een VASTE lengte (N_TABLE_SLOTS). Eerder had de
+    gesorteerde afstandsvector lengte n; bij een ander tafelaantal schoof
+    daardoor de hele rest van de featurevector op, stilzwijgend.
+    """
+    n    = len(variable)
+    W, H = float(room["w"]), float(room["h"])
+    diag = math.hypot(W, H)
+    dock = room["bar"]["dock"]
+
+    cx  = np.array([t["x"] for t in variable], dtype=float)
+    cy  = np.array([t["y"] for t in variable], dtype=float)
+    cw  = np.array([t["w"] for t in variable], dtype=float)
+    ch  = np.array([t["h"] for t in variable], dtype=float)
+
+    def fixed(arr, fill=0.0):
+        """Kap of vul aan tot N_TABLE_SLOTS, zodat de vector nooit verschuift."""
+        a = list(arr)[:N_TABLE_SLOTS]
+        return a + [fill] * (N_TABLE_SLOTS - len(a))
+
+    # Positie en afmeting per tafel, genormaliseerd op de zaal.
     raw = []
-    for t in variable:
-        raw += [t["x"], t["y"], t["rotation"], t["w"], t["h"]]
+    for t in fixed(variable, None):
+        if t is None:
+            raw += [0.0, 0.0, 0.0, 0.0, 0.0]
+        else:
+            raw += [t["x"] / W, t["y"] / H, t.get("rotation", 0) / 90.0,
+                    t["w"] / diag, t["h"] / diag]
 
-    # Per-tafel afstand tot bar dock
-    bar_dists = np.sqrt((cx - BAR_DOCK_X)**2 + (cy - BAR_DOCK_Y)**2)
+    # Hemelsbrede afstand tot de bardock, in eenheden van de diagonaal.
+    bar_dists = np.sqrt((cx - dock["x"])**2 + (cy - dock["y"])**2) / diag
 
-    # Gesorteerde bar-afstanden (extra informatief voor model)
-    sorted_dists = np.sort(bar_dists)
-
-    # Pairwise afstanden (compactheid / clustering)
+    # Paarsgewijze afstanden: compactheid en clustering.
     diffs = []
     for i in range(n):
         for j in range(i + 1, n):
-            diffs.append(np.sqrt((cx[i]-cx[j])**2 + (cy[i]-cy[j])**2))
+            diffs.append(math.hypot(cx[i]-cx[j], cy[i]-cy[j]) / diag)
     diffs = np.array(diffs) if diffs else np.array([0.0])
 
-    # Zwaartepunt en spreiding
-    cx_mean, cy_mean = cx.mean(), cy.mean()
-    cx_std,  cy_std  = cx.std(),  cy.std()
+    # Hoeveel tafels staan in de helft van de zaal waar de bar is? Dat is de
+    # zaalonafhankelijke versie van de oude "x > 400"-drempel, die aannam dat
+    # de bar altijd rechts stond.
+    if abs(dock["x"] - W / 2) >= abs(dock["y"] - H / 2):
+        near_bar = (cx > W / 2) if dock["x"] > W / 2 else (cx < W / 2)
+    else:
+        near_bar = (cy > H / 2) if dock["y"] > H / 2 else (cy < H / 2)
+    bar_side = float(near_bar.sum()) / max(n, 1)
 
-    # Rechts-bias: hoe dicht bij de bar (rechterkant, x > 400)
-    right_bias = (cx > 400).sum() / n
+    cx_n, cy_n = cx / W, cy / H
+    centroid_to_bar = math.hypot(cx.mean() - dock["x"], cy.mean() - dock["y"]) / diag
 
-    # Afstand van zwaartepunt tot bar
-    centroid_to_bar = np.sqrt((cx_mean - BAR_DOCK_X)**2 + (cy_mean - BAR_DOCK_Y)**2)
-
-    # Compactheid: gemiddeld inter-tafel afstand normaliseerd
-    compactness = diffs.mean() / 640.0
-
-    # Edge-to-edge corridor widths between table pairs (pad-blokkering detectie)
+    # Corridorbreedtes tussen tafelparen: detecteert dichtgezette doorgangen.
     edge_gaps = []
     for i in range(n):
         for j in range(i + 1, n):
-            # Horizontale en verticale edge-to-edge gaps
             gap_x = max(0.0, max(cx[i], cx[j]) - min(cx[i]+cw[i], cx[j]+cw[j]))
             gap_y = max(0.0, max(cy[i], cy[j]) - min(cy[i]+ch[i], cy[j]+ch[j]))
-            # Effectieve corridor: minimaal van x/y als ze overlappen in de andere as
-            overlap_x = min(cx[i]+cw[i], cx[j]+cw[j]) - max(cx[i], cx[j])
-            overlap_y = min(cy[i]+ch[i], cy[j]+ch[j]) - max(cy[i], cy[j])
-            if overlap_x > 0:   # naast elkaar in x → y-gap is de corridor
-                edge_gaps.append(gap_y)
-            elif overlap_y > 0:  # boven/onder elkaar → x-gap is de corridor
-                edge_gaps.append(gap_x)
-            else:                # diagonaal → min van beide
-                edge_gaps.append(min(gap_x, gap_y))
-    edge_gaps = np.array(edge_gaps) if edge_gaps else np.array([640.0])
+            ov_x  = min(cx[i]+cw[i], cx[j]+cw[j]) - max(cx[i], cx[j])
+            ov_y  = min(cy[i]+ch[i], cy[j]+ch[j]) - max(cy[i], cy[j])
+            edge_gaps.append(gap_y if ov_x > 0 else (gap_x if ov_y > 0 else min(gap_x, gap_y)))
+    edge_gaps = np.array(edge_gaps) if edge_gaps else np.array([diag])
 
-    # Minimum gap tot rechter wand (waar de bar is)
-    bar_wall_x = 640 - 90   # linkerrand van bar-rect
-    gap_to_bar_wall = bar_wall_x - (cx + cw)  # afstand rechterrand tafel → bar-wand
-    min_gap_bar   = gap_to_bar_wall.min()
+    # Kleinste vrije ruimte tussen een tafel en de bar-rechthoek, aan welke
+    # wand die ook staat. De oude versie rekende met `640 - 90 - (x + w)` en
+    # codeerde daarmee "de bar staat rechts" in een getal.
+    b = room["bar"]
+    gaps_bar = []
+    for i in range(n):
+        dx = max(b["x"] - (cx[i] + cw[i]), cx[i] - (b["x"] + b["w"]), 0.0)
+        dy = max(b["y"] - (cy[i] + ch[i]), cy[i] - (b["y"] + b["h"]), 0.0)
+        gaps_bar.append(math.hypot(dx, dy) / diag)
+    min_gap_bar = min(gaps_bar) if gaps_bar else 0.0
 
-    # Engeneered features
     eng = [
         bar_dists.mean(), bar_dists.min(), bar_dists.max(),
         bar_dists.std(),  bar_dists.sum(),
-        *sorted_dists,                    # gesorteerd: van dichtst naar verst
-        cx_mean, cy_mean, cx_std, cy_std,
+        *fixed(np.sort(bar_dists)),
+        cx_n.mean(), cy_n.mean(), cx_n.std(), cy_n.std(),
         diffs.mean(), diffs.std(), diffs.min(), diffs.max(),
-        right_bias, centroid_to_bar, compactness,
-        cw.mean(), ch.mean(),             # gem. tafelgrootte
-        # Corridor features (pad-blokkering)
-        edge_gaps.min(), edge_gaps.mean(),
-        float((edge_gaps < 36).sum()),    # aantal te-nauwe corridors (< A*-cel × 2)
-        float((edge_gaps < 50).sum()),    # aantal krappe corridors
-        min_gap_bar,                      # ruimte naar bar-wand
+        bar_side, centroid_to_bar, diffs.mean(),
+        cw.mean() / diag, ch.mean() / diag,
+        edge_gaps.min() / diag, edge_gaps.mean() / diag,
+        float((edge_gaps < 36).sum()),
+        float((edge_gaps < 50).sum()),
+        min_gap_bar,
     ]
 
     # Padfeatures: de eng-lijst hierboven is volledig Euclidisch, terwijl het
-    # target een A*-padlengte is. Een tafel die een doorgang dichtzet is
-    # hemelsbreed onzichtbaar. pathgrid bouwt hetzelfde loopgrid als de
-    # simulator en levert echte padafstanden vanaf de bardock.
-    path = pg.path_features(variable)
+    # target een A*-padlengte is. pathgrid bouwt hetzelfde loopgrid als de
+    # simulator, nu voor deze zaal.
+    path = pg.path_features(variable, room)
 
-    return raw + eng + path
+    return [float(v) for v in (room_features(room) + raw + eng + path)]
 
 
-def extract_frontier_features(variable):
+def extract_frontier_features(variable, room=CLASSIC):
     """
     Basisfeatures plus de tour-features.
 
@@ -244,7 +315,7 @@ def extract_frontier_features(variable):
     tilt dit de rangschikking binnen het door het model gekozen deciel van
     rho 0,392 naar 0,427, consistent over alle drie de seeds. Zie README.
     """
-    return extract_features_from_list(variable) + pg.tour_features(variable)
+    return extract_features_from_list(variable, room) + pg.tour_features(variable, room)
 
 
 # ── Modellen ─────────────────────────────────────────────────
@@ -349,7 +420,7 @@ if __name__ == "__main__":
     # gebruikt het basismodel voor de brede zoektocht en dit model om de
     # kopgroep te herordenen -- precies waar de tour-features helpen.
     print("\n  Frontier-model (basis + tour-features)…")
-    T  = np.array([pg.tour_features(v) for v in variables], dtype=np.float32)
+    T  = np.array([pg.tour_features(v, rm) for v, rm in variables], dtype=np.float32)
     XF = np.hstack([X, T])
     oof_f = np.zeros(len(y))
     for tr, te in GroupKFold(n_splits=5).split(XF, y, groups=groups):

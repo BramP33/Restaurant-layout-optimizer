@@ -29,10 +29,15 @@ import math
 
 import numpy as np
 
+from rooms import CLASSIC, buffet_slot_points as _room_slot_points  # noqa: E402
+
 CELL     = 18
-ROOM_W   = 640
-ROOM_H   = 640
-BAR_RECT = (ROOM_W - 90, 50, 70, ROOM_H - 100)
+# Terugvalzaal. Elke functie hieronder neemt een `room`; laat je hem weg dan
+# krijg je de zaal waarop alle eerdere data verzameld is, zodat oude aanroepen
+# ongewijzigd blijven werken.
+ROOM_W   = CLASSIC["w"]
+ROOM_H   = CLASSIC["h"]
+BAR_RECT = (ROOM_W - 90, 50, 70, ROOM_H - 100)   # alleen nog documentatie
 # Buffetlijn tegen de linkerwand -- moet exact overeenkomen met makeBuffet()
 # in simulatie.html, anders meet de spiegel een andere vloer dan de simulator.
 # Alleen aanwezig bij party-types met hasBuffet; de hele pipeline draait op
@@ -40,6 +45,10 @@ BAR_RECT = (ROOM_W - 90, 50, 70, ROOM_H - 100)
 BUFFET_RECT = (20, 170, 60, max(160, ROOM_H - 340))
 BAR_DOCK = (ROOM_W - 110, 80)          # simulatie.html:1153 — NIET het midden van de bar
 ENTRANCE = (48, ROOM_H - 54)           # simulatie.html:1145
+
+def grid_shape(room):
+    return math.ceil(room["h"] / CELL), math.ceil(room["w"] / CELL)
+
 
 COLS = math.ceil(ROOM_W / CELL)
 ROWS = math.ceil(ROOM_H / CELL)
@@ -109,11 +118,12 @@ def table_chairs(t):
             for dx, dy in local]
 
 
-def build_blocked(tables):
-    """(ROWS, COLS) bool-array — True waar het celmiddelpunt in meubilair valt."""
-    xs = (np.arange(COLS) * CELL + CELL / 2)[None, :]
-    ys = (np.arange(ROWS) * CELL + CELL / 2)[:, None]
-    blocked = np.zeros((ROWS, COLS), dtype=bool)
+def build_blocked(tables, room=CLASSIC):
+    """(rows, cols) bool-array — True waar het celmiddelpunt in meubilair valt."""
+    rows, cols = grid_shape(room)
+    xs = (np.arange(cols) * CELL + CELL / 2)[None, :]
+    ys = (np.arange(rows) * CELL + CELL / 2)[:, None]
+    blocked = np.zeros((rows, cols), dtype=bool)
 
     def add(x, y, w, h):
         nonlocal blocked
@@ -125,24 +135,33 @@ def build_blocked(tables):
         for cx, cy in table_chairs(t):
             add(cx - 11, cy - 11, 22, 22)
 
-    bx, by, bw, bh = BAR_RECT
-    add(bx - 4, by - 4, bw + 8, bh + 8)
+    b = room["bar"]
+    add(b["x"] - 4, b["y"] - 4, b["w"] + 8, b["h"] + 8)
 
-    fx, fy, fw, fh = BUFFET_RECT
-    add(fx - 4, fy - 4, fw + 8, fh + 8)
+    f = room.get("buffet")
+    if f:
+        add(f["x"] - 4, f["y"] - 4, f["w"] + 8, f["h"] + 8)
+
+    # Kolommen, podia en uitgesneden hoeken: alles wat vloer wegneemt zonder
+    # meubilair te zijn. Zelfde inflatie als de bar, want een agent moet er
+    # net zo goed omheen.
+    for blk in room.get("blocks", []):
+        add(blk["x"] - 4, blk["y"] - 4, blk["w"] + 8, blk["h"] + 8)
     return blocked
 
 
 # ── Afstandsveld ─────────────────────────────────────────────────────────────
 
-def point_to_cell(p):
-    return (min(max(int(p[1] // CELL), 0), ROWS - 1),
-            min(max(int(p[0] // CELL), 0), COLS - 1))
+def point_to_cell(p, blocked):
+    rows, cols = blocked.shape
+    return (min(max(int(p[1] // CELL), 0), rows - 1),
+            min(max(int(p[0] // CELL), 0), cols - 1))
 
 
 def nearest_open(blocked, p, radius=3):
     """Dichtstbijzijnde vrije cel in ringen rond p — zoals nearestOpenPoint()."""
-    r0, c0 = point_to_cell(p)
+    rows, cols = blocked.shape
+    r0, c0 = point_to_cell(p, blocked)
     if not blocked[r0, c0]:
         return r0, c0
     for r in range(1, radius + 1):
@@ -151,7 +170,7 @@ def nearest_open(blocked, p, radius=3):
                 if abs(dr) != r and abs(dc) != r:
                     continue
                 rr, cc = r0 + dr, c0 + dc
-                if 0 <= rr < ROWS and 0 <= cc < COLS and not blocked[rr, cc]:
+                if 0 <= rr < rows and 0 <= cc < cols and not blocked[rr, cc]:
                     return rr, cc
     return None
 
@@ -167,10 +186,11 @@ def components(blocked):
     doorgang telt, plakt gebieden aan elkaar die nooit verbonden zijn -- en
     daar kroop de optimizer in.
     """
-    label = np.full((ROWS, COLS), -1, dtype=np.int32)
+    rows, cols = blocked.shape
+    label = np.full((rows, cols), -1, dtype=np.int32)
     sizes = []
-    for r0 in range(ROWS):
-        for c0 in range(COLS):
+    for r0 in range(rows):
+        for c0 in range(cols):
             if blocked[r0, c0] or label[r0, c0] >= 0:
                 continue
             cid = len(sizes)
@@ -185,7 +205,7 @@ def components(blocked):
                         if dr == 0 and dc == 0:
                             continue
                         nr, nc = r + dr, c + dc
-                        if not (0 <= nr < ROWS and 0 <= nc < COLS) or blocked[nr, nc]:
+                        if not (0 <= nr < rows and 0 <= nc < cols) or blocked[nr, nc]:
                             continue
                         if dr and dc and (blocked[r, nc] or blocked[nr, c]):
                             continue          # hoekregel, gelijk aan findPath
@@ -199,7 +219,8 @@ def components(blocked):
 
 def entry_components(blocked, label, p):
     """De componenten waarin een agent op punt p terecht kan komen."""
-    r0, c0 = point_to_cell(p)
+    rows, cols = blocked.shape
+    r0, c0 = point_to_cell(p, blocked)
     if not blocked[r0, c0]:
         return {int(label[r0, c0])}
     out = set()
@@ -208,7 +229,7 @@ def entry_components(blocked, label, p):
             if dr == 0 and dc == 0:
                 continue
             nr, nc = r0 + dr, c0 + dc
-            if not (0 <= nr < ROWS and 0 <= nc < COLS) or blocked[nr, nc]:
+            if not (0 <= nr < rows and 0 <= nc < cols) or blocked[nr, nc]:
                 continue
             if dr and dc:
                 # De startcel telt hier als vrij, net als in walkable().
@@ -220,7 +241,24 @@ def entry_components(blocked, label, p):
     return out
 
 
-def waiter_floor(blocked, n_waiters=3):
+def waiter_spawn(room, i):
+    """
+    Waar ober `i` begint.
+
+    De obers staan naast elkaar LANGS de bar. Altijd verticaal stapelen ging
+    goed zolang de bar tegen een zijwand stond, maar zet de bar onderaan en
+    dan staan ober twee en drie middenin het meubel -- geen gemeenschappelijke
+    loopvloer, en elke layout wordt ongeldig verklaard. Moet gelijk zijn aan
+    waiterSpawn() in simulatie.html.
+    """
+    d = room["bar"]["dock"]
+    b = room["bar"]
+    if b["h"] >= b["w"]:                 # verticale bar: naast elkaar in y
+        return (d["x"], d["y"] + i * 22)
+    return (d["x"] + i * 22, d["y"])     # horizontale bar: naast elkaar in x
+
+
+def waiter_floor(blocked, n_waiters=3, room=CLASSIC):
     """
     De gedeelde loopvloer van de obers: de grootste component waar ze alle
     drie in kunnen komen. None als die niet bestaat -- dan staat er minstens
@@ -229,7 +267,7 @@ def waiter_floor(blocked, n_waiters=3):
     label, sizes = components(blocked)
     common = None
     for i in range(n_waiters):
-        spawn = (BAR_DOCK[0], BAR_DOCK[1] + i * 22)
+        spawn = waiter_spawn(room, i)
         e = entry_components(blocked, label, spawn)
         common = e if common is None else (common & e)
         if not common:
@@ -238,17 +276,18 @@ def waiter_floor(blocked, n_waiters=3):
     return label, sizes, floor
 
 
-def layout_valid(blocked, tables, n_waiters=3):
+def layout_valid(blocked, tables, n_waiters=3, room=CLASSIC):
     """
     Spiegel van SimulationEngine._checkLayoutReachability(). Geeft
     (valid, unreachable_tables, trapped_waiters).
     """
-    label, sizes, floor = waiter_floor(blocked, n_waiters)
+    dock = (room["bar"]["dock"]["x"], room["bar"]["dock"]["y"])
+    label, sizes, floor = waiter_floor(blocked, n_waiters, room)
     if floor is None:
         return False, len(tables), n_waiters
     trapped = 0
     for i in range(n_waiters):
-        spawn = (BAR_DOCK[0], BAR_DOCK[1] + i * 22)
+        spawn = waiter_spawn(room, i)
         if floor not in entry_components(blocked, label, spawn):
             trapped += 1
 
@@ -256,19 +295,19 @@ def layout_valid(blocked, tables, n_waiters=3):
         cell = nearest_open(blocked, p, radius=5)
         return cell is not None and int(label[cell]) == floor
 
-    if sizes[floor] < 10 or not in_floor(BAR_DOCK):
+    if sizes[floor] < 10 or not in_floor(dock):
         return False, len(tables), trapped
 
     # Spiegel van de buffettoets in simulatie.html: een indeling die de
     # buffetlijn afsluit is ongeldig. Zonder deze regel keurt de zeef iets
     # anders goed dan de simulator, en dat verschil is precies waar een
     # optimizer op afgaat.
-    if not any(in_floor(p) for p in buffet_slot_points()):
+    if room.get("buffet") and not any(in_floor(p) for p in buffet_slot_points(room)):
         return False, len(tables), trapped
 
     unreachable = 0
     for t in tables:
-        if not any(in_floor(p) for p in service_points(t)):
+        if not any(in_floor(p) for p in service_points(t, room)):
             unreachable += 1
     return unreachable == 0 and trapped == 0, unreachable, trapped
 
@@ -281,7 +320,8 @@ def distance_field(blocked, start_point):
     Een enkele sweep geeft de afstand naar elke tafel tegelijk; dat is waarom
     dit betaalbaar is voor duizenden layouts.
     """
-    dist = np.full((ROWS, COLS), np.inf)
+    rows, cols = blocked.shape
+    dist = np.full((rows, cols), np.inf)
     # De obers lopen naar nearestOpenPoint(dock, 5), niet naar de dockcel zelf;
     # dat punt is dus het eerlijke vertrekpunt. Een geblokkeerde cel mag nooit
     # het zaad zijn: dan sijpelt de sweep naar buiten via een cel waar niemand
@@ -301,7 +341,7 @@ def distance_field(blocked, start_point):
                 if dr == 0 and dc == 0:
                     continue
                 nr, nc = r + dr, c + dc
-                if not (0 <= nr < ROWS and 0 <= nc < COLS) or blocked[nr, nc]:
+                if not (0 <= nr < rows and 0 <= nc < cols) or blocked[nr, nc]:
                     continue
                 if dr != 0 and dc != 0:
                     # Hoekregel: diagonaal mag niet langs twee geblokkeerde buren
@@ -318,7 +358,7 @@ def distance_field(blocked, start_point):
 
 # ── Servicepunten ────────────────────────────────────────────────────────────
 
-def service_points(t):
+def service_points(t, room=CLASSIC):
     """De acht aanlooppunten rond een tafel — zoals _servicePoint()."""
     t = normalise_table(t)
     cx, cy = t["x"] + t["w"] / 2, t["y"] + t["h"] / 2
@@ -330,11 +370,11 @@ def service_points(t):
         (x0 - g, y0 - g), (x0 + w + g, y0 - g),
         (x0 - g, y0 + h + g), (x0 + w + g, y0 + h + g),
     ]
-    return [(min(max(px, 16), ROOM_W - 16), min(max(py, 16), ROOM_H - 16))
+    return [(min(max(px, 16), room["w"] - 16), min(max(py, 16), room["h"] - 16))
             for px, py in cands]
 
 
-def table_access(blocked, dist, t):
+def table_access(blocked, dist, t, room=CLASSIC):
     """
     (padafstand, euclidische afstand) naar het best bereikbare servicepunt.
 
@@ -343,7 +383,7 @@ def table_access(blocked, dist, t):
     kortste padafstand vanaf het startpunt van de sweep.
     """
     best_path, best_pt = np.inf, None
-    for p in service_points(t):
+    for p in service_points(t, room):
         cell = nearest_open(blocked, p, radius=3)
         if cell is None:
             continue
@@ -374,15 +414,14 @@ def table_access(blocked, dist, t):
 N_PATH_FEATURES = 24
 
 
-def buffet_slot_points():
+def buffet_slot_points(room=CLASSIC):
     """Aanlooppunten op de zaalkant van de buffetlijn -- zelfde formule als
-    buffetSlotPoints() in simulatie.html."""
-    fx, fy, fw, fh = BUFFET_RECT
-    slots = 3
-    return [(fx + fw + 26, fy + (i + 0.5) / slots * fh) for i in range(slots)]
+    buffetSlotPoints() in simulatie.html. Gedeeld met rooms.py zodat er maar
+    een definitie bestaat."""
+    return _room_slot_points(room.get("buffet"))
 
 
-def overlaps_buffet(tables):
+def overlaps_buffet(tables, room=CLASSIC):
     """
     Staat er een tafel in de buffetlijn?
 
@@ -391,7 +430,10 @@ def overlaps_buffet(tables):
     de optimizer moet er apart op filteren -- precies het soort gat waar de
     zoektocht eerder in kroop.
     """
-    fx, fy, fw, fh = BUFFET_RECT
+    f = room.get("buffet")
+    if not f:
+        return False
+    fx, fy, fw, fh = f["x"], f["y"], f["w"], f["h"]
     for t in tables:
         if t.get("size") == "custom":
             continue
@@ -401,7 +443,7 @@ def overlaps_buffet(tables):
     return False
 
 
-def path_features(variable, fixed=()):
+def path_features(variable, room=CLASSIC, fixed=()):
     """
     Padgebaseerde features uit een enkele Dijkstra-sweep vanaf de bardock.
 
@@ -423,18 +465,19 @@ def path_features(variable, fixed=()):
     # met getekende tafels naspeelt, geeft hier iets mee.
     tables = list(fixed) + list(variable)
 
-    blocked = build_blocked(tables)
-    dist    = distance_field(blocked, BAR_DOCK)
+    dock    = (room["bar"]["dock"]["x"], room["bar"]["dock"]["y"])
+    blocked = build_blocked(tables, room)
+    dist    = distance_field(blocked, dock)
 
     free      = ~blocked
     reachable = np.isfinite(dist) & free
 
     paths, euclids, seats = [], [], []
     for t in variable:
-        p, pt = table_access(blocked, dist, t)
+        p, pt = table_access(blocked, dist, t, room)
         tn = normalise_table(t)
         cx, cy = tn["x"] + tn["w"] / 2, tn["y"] + tn["h"] / 2
-        e = math.hypot(cx - BAR_DOCK[0], cy - BAR_DOCK[1])
+        e = math.hypot(cx - dock[0], cy - dock[1])
         paths.append(p)
         euclids.append(e)
         seats.append(float(tn.get("seats", 4)))
@@ -453,7 +496,12 @@ def path_features(variable, fixed=()):
     # terwijl een ruime layout op ~600 px zit, dus daar zou een afgesloten
     # tafel goedkoper uitvallen dan een ver-maar-bereikbare. Dat is precies de
     # vorm van de exploit die we dichttimmeren, nu in de featureruimte.
-    penalty = 10.0 * ROOM_W          # 6.400 px, ruim boven de langste route
+    # Bovengrens die per constructie klopt: geen kortste route kan langer zijn
+    # dan alle vrije cellen achter elkaar. De oude waarde (10 x zaalbreedte)
+    # was geijkt op 640x640; in een grotere zaal kon een onbereikbare tafel
+    # daardoor goedkoper uitvallen dan een verre bereikbare -- precies de
+    # exploit die dit commentaar hierboven beschrijft.
+    penalty = float(free.sum()) * CELL + 1.0
     paths = np.where(np.isinf(paths), penalty, paths)
 
     detour = paths / np.maximum(euclids, 1.0)
@@ -491,7 +539,7 @@ def path_features(variable, fixed=()):
 N_TOUR_FEATURES = 14
 
 
-def tour_features(variable):
+def tour_features(variable, room=CLASSIC):
     """
     Wat de ober werkelijk loopt: de kosten van een rit langs meerdere tafels.
 
@@ -511,11 +559,11 @@ def tour_features(variable):
     path_features. Te duur voor een brede zoektocht, de moeite waard om de
     kopgroep te herordenen -- en daar helpen ze ook het meest.
     """
-    blocked = build_blocked(variable)
+    blocked = build_blocked(variable, room)
     n       = len(variable)
-    BIG     = 10.0 * ROOM_W
+    BIG     = float((~blocked).sum()) * CELL + 1.0   # zie path_features
 
-    bar = distance_field(blocked, BAR_DOCK)
+    bar = distance_field(blocked, (room["bar"]["dock"]["x"], room["bar"]["dock"]["y"]))
 
     # Het anker per tafel MOET op de obervloer liggen. Het eerste servicepunt
     # met een vrije cel in de buurt pakken is niet genoeg: dat kan een
@@ -527,7 +575,7 @@ def tour_features(variable):
     # onbereikbaar servicepunt heeft afstand inf en wint nooit.
     fields, pts = [], []
     for t in variable:
-        _d, bp = table_access(blocked, bar, t)
+        _d, bp = table_access(blocked, bar, t, room)
         pts.append(bp)
         fields.append(distance_field(blocked, bp) if bp is not None else None)
 

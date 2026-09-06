@@ -55,14 +55,29 @@ def generate_batch_file(n, out_path, rng_seed):
     """Schrijft n willekeurige geldige layouts in het formaat van validate_headless.js."""
     import numpy as np
     sys.path.insert(0, str(HERE))
-    from optimize_layout import generate_batch, ROOM_W, ROOM_H
+    from optimize_layout import generate_batch, fit_table_mix
 
     import pathgrid as pg
+    import rooms as rm
 
     rng = np.random.default_rng(rng_seed)
+
+    # Elke ronde een andere zaal. Zonder dit leert het model een zaal in plaats
+    # van een indelingsprincipe. fit_room laat de zaal groeien tot het meubilair
+    # er redelijk in past, want zes kolommen in een kleine zaal leveren nul
+    # plaatsbare layouts.
+    room = rm.make_room(rng)
+    # Tafels en gasten schalen met de zaal. Een vast aantal zou de vergelijking
+    # tussen zalen scheeftrekken: een grote zaal krijgt dan onnodig lange
+    # looproutes en een kleine zaal wint automatisch.
+    types, mix = fit_table_mix(room, rng)
+    print(f"  zaal: {room['kind']} {room['w']}x{room['h']}, bar {room['bar_wall']}, "
+          f"{len(room['blocks'])} blokken -> {mix['tLarge']}L+{mix['tMedium']}M "
+          f"({mix['seats']} zitplaatsen, {mix['guests']} gasten)", flush=True)
+
     layouts, seen, rejected = [], 0, 0
     for _ in range(20):
-        batch, _hit = generate_batch(n * 3, rng)
+        batch, _hit = generate_batch(n * 3, rng, room=room, types=types)
         for layout in batch:
             seen += 1
             # Zeef vooraf: een indeling waarin een ober opgesloten staat of een
@@ -76,7 +91,8 @@ def generate_batch_file(n, out_path, rng_seed):
             # toelichting in pathgrid.py. Ze toch als obstakel meerekenen keurt
             # indelingen af die in de simulatie prima lopen.
             var = [t for t in layout if t.get("size") != "custom"]
-            valid, _unreach, _trapped = pg.layout_valid(pg.build_blocked(var), var)
+            valid, _unreach, _trapped = pg.layout_valid(
+                pg.build_blocked(var, room), var, room=room)
             if valid:
                 layouts.append(layout)
             else:
@@ -93,8 +109,10 @@ def generate_batch_file(n, out_path, rng_seed):
         "rank": i + 1,
         "predicted_waiterDist": 0,
         "predicted_score": 0,
-        "config": {"roomW": ROOM_W, "roomH": ROOM_H, "guests": 49, "waiters": 3,
-                   "tSmall": 0, "tMedium": 6, "tLarge": 2, "partyType": "buffet"},
+        "config": {"room": room, "roomW": room["w"], "roomH": room["h"],
+                   "guests": mix["guests"], "waiters": 3,
+                   "tSmall": 0, "tMedium": mix["tMedium"], "tLarge": mix["tLarge"],
+                   "partyType": "buffet"},
         "tables": layout,
     } for i, layout in enumerate(layouts)]
 

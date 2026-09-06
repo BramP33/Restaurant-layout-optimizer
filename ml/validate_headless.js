@@ -40,9 +40,15 @@ async function runValidation(page, layout, nSeeds) {
       if (!engine) { resolve({ error: 'engine niet gevonden' }); return; }
 
       const varTables = layout.tables.filter(t => t.size !== 'custom');
+      // De zaal komt uit ml/rooms.py en wordt hier alleen doorgegeven. Geen
+      // `|| 640`-terugval meer op de afmetingen: die maakte van een ontbrekende
+      // zaal stilzwijgend een andere zaal, en dan meet Python iets anders dan
+      // de simulator draait.
+      const room = layout.config.room || null;
       const cfg = {
-        roomW: layout.config.roomW || 640,
-        roomH: layout.config.roomH || 640,
+        room,
+        roomW: room ? room.w : (layout.config.roomW || 640),
+        roomH: room ? room.h : (layout.config.roomH || 640),
         guests: layout.config.guests || 49,
         waiters: layout.config.waiters || 3,
         tSmall: 0, tMedium: 0, tLarge: 0,

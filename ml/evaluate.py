@@ -33,7 +33,7 @@ MODEL_FILE = ROOT / "surrogate_model.pkl"
 VAL_FILE   = ROOT / "validation-results.json"
 
 
-def _features(tables, feat_len, frontier=False):
+def _features(tables, feat_len, frontier=False, room=None):
     """
     Zelfde feature-pad als de optimizer, zodat de voorspelling vergelijkbaar is.
 
@@ -44,7 +44,10 @@ def _features(tables, feat_len, frontier=False):
     """
     var = [t for t in tables if t["size"] != "custom"]
     var.sort(key=lambda t: (-t["w"], t["x"], t["y"]))
-    row = extract_frontier_features(var) if frontier else extract_features_from_list(var)
+    from rooms import CLASSIC
+    rm  = room or CLASSIC
+    row = (extract_frontier_features(var, rm) if frontier
+           else extract_features_from_list(var, rm))
     row = row + [0.0] * max(0, feat_len - len(row))
     return np.array([row], dtype=np.float32)
 
@@ -75,7 +78,8 @@ def report():
         # doel. Het frontier-getal staat erbij, expliciet als optimistisch.
         def _calib(model, feat_len, frontier):
             errs = [(float(model.predict(_features(v["tables"], feat_len,
-                                                   frontier=frontier))[0])
+                                                   frontier=frontier,
+                                                   room=(v.get("config") or {}).get("room"))))[0]
                      - v["actual_dist"]) / v["actual_dist"]
                     for v in val if "tables" in v]
             return (float(np.mean(errs)) * 100, len(errs)) if errs else (None, 0)

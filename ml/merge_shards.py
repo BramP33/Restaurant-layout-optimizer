@@ -19,10 +19,32 @@ ROOT = HERE.parent
 SHARD_DIR = ROOT / "data" / "shards"
 
 
+def room_key(run):
+    """
+    Identificeert de ZAAL waarin een run gedraaid is.
+
+    Zonder dit zijn twee identieke tafelposities in twee verschillende zalen
+    hetzelfde record, en worden ze als duplicaat samengevoegd. Dat corrumpeert
+    de dataset zonder dat er iets faalt, en dezelfde sleutel wordt gebruikt om
+    te dedupliceren in train_surrogate.
+    """
+    r = (run.get("config") or {}).get("room")
+    if not r:
+        cfg = run.get("config") or {}
+        return ("klassiek", cfg.get("roomW", 640), cfg.get("roomH", 640))
+    b, f = r["bar"], r.get("buffet")
+    return (r.get("kind", "?"), r["w"], r["h"],
+            b["x"], b["y"], b["w"], b["h"],
+            (f["x"], f["y"], f["w"], f["h"]) if f else None,
+            r["entrance"]["x"], r["entrance"]["y"],
+            tuple(sorted((x["x"], x["y"], x["w"], x["h"]) for x in r.get("blocks", []))))
+
+
 def layout_key(run):
     var = [t for t in run.get("tables", []) if t.get("size") != "custom"]
-    return tuple(sorted((round(t["x"], 1), round(t["y"], 1), t["size"], t["rotation"])
-                        for t in var))
+    return (room_key(run),
+            tuple(sorted((round(t["x"], 1), round(t["y"], 1), t["size"], t["rotation"])
+                         for t in var)))
 
 
 def main():
