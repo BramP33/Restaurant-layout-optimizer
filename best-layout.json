@@ -261,5 +261,7 @@
       "h": 60,
       "seats": 4
     }
-  ]
+  ],
+  "INGETROKKEN": true,
+  "ingetrokken_reden": "Dit layout is fysiek onmogelijk: vier tafelparen overlappen elkaar, waarvan drie tafels praktisch op een stapel staan (overlap tot 59x43 px). Kleinste tafelafstand: -46.5 px, waar de generator 50 px corridor eist.\n\nOorzaak: generate_batch dwong die corridor wel af, maar local_refine verschoof daarna 500 rondes lang tafels van +-35 px zonder enige botsingstoets. layout_valid keurde het goed, want die toetst bereikbaarheid en niet of tafels door elkaar heen staan. Gemeten effect van drie tafels op een stapel: waiterDist -39%, bij gelijk aantal bediende gasten.\n\nDe gerapporteerde 204.768 px en de winst van 19,0% op de baseline zijn daarmee INGETROKKEN. Het cijfer was grotendeels dit artefact.\n\nGerepareerd in pathgrid.tables_ok() plus een poort in _score_layouts en een toets in local_refine. Een nieuwe kampioen volgt uit de eerstvolgende trainingscyclus op de zaalvariatie-dataset."
 }

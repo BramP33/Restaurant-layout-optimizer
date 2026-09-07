@@ -107,47 +107,113 @@ def _entrance_on_wall(w, h, wall):
 
 # ── Archetypen ───────────────────────────────────────────────────────────────
 
-def _blocks_for(kind, w, h, rng):
-    """De vloer die dit archetype wegneemt."""
-    if kind == "kolommen":
-        # Dragende kolommen in een raster. Het meest genoemde praktijkprobleem:
-        # ze staan midden in de zaal en verplaatsen zich niet.
-        cols, rows = rng.integers(2, 4), rng.integers(1, 3)
-        size  = int(rng.integers(26, 40))
-        out = []
-        for i in range(cols):
-            for j in range(rows):
-                cx = w * (i + 1) / (cols + 1)
-                cy = h * (j + 1) / (rows + 1)
-                out.append({"x": int(cx - size / 2), "y": int(cy - size / 2),
-                            "w": size, "h": size})
-        return out
-    if kind == "l-vorm":
-        # Hoek eruit: twee deelruimtes met een knik ertussen.
-        bw = int(w * rng.uniform(0.28, 0.40))
-        bh = int(h * rng.uniform(0.28, 0.40))
-        corner = int(rng.integers(0, 4))
-        x = 0 if corner in (0, 2) else w - bw
-        y = 0 if corner in (0, 1) else h - bh
-        return [{"x": x, "y": y, "w": bw, "h": bh}]
-    if kind == "nis":
-        # Een alkoof: een lange muur die een uithoek afsnijdt. Die uithoek ligt
-        # ver van de bar, en dat is precies waar bedienen duur wordt.
-        thick = 40
-        if rng.random() < 0.5:
-            y = int(h * rng.uniform(0.30, 0.55))
-            return [{"x": int(w * 0.40), "y": y, "w": int(w * 0.60), "h": thick}]
-        x = int(w * rng.uniform(0.30, 0.55))
-        return [{"x": x, "y": int(h * 0.40), "w": thick, "h": int(h * 0.60)}]
-    if kind == "podium":
-        # Podium of dansvloer: neemt vloer weg zonder de omtrek te veranderen.
-        d = int(min(w, h) * rng.uniform(0.16, 0.24))
-        wall = ["boven", "onder", "links", "rechts"][int(rng.integers(0, 4))]
-        if wall == "boven":  return [{"x": int(w*0.25), "y": 0,     "w": int(w*0.50), "h": d}]
-        if wall == "onder":  return [{"x": int(w*0.25), "y": h - d, "w": int(w*0.50), "h": d}]
-        if wall == "links":  return [{"x": 0,     "y": int(h*0.25), "w": d, "h": int(h*0.50)}]
-        return [{"x": w - d, "y": int(h*0.25), "w": d, "h": int(h*0.50)}]
+def _overlap(a, b, pad=0):
+    return (a["x"] - pad < b["x"] + b["w"] and a["x"] + a["w"] + pad > b["x"] and
+            a["y"] - pad < b["y"] + b["h"] and a["y"] + a["h"] + pad > b["y"])
+
+
+def _fits(block, bar, buffet, entrance, pad=20):
+    """Botst dit blok met meubilair of de deur?"""
+    door = {"x": entrance["x"] - 55, "y": entrance["y"] - 45, "w": 110, "h": 90}
+    dock = {"x": bar["dock"]["x"] - 30, "y": bar["dock"]["y"] - 30, "w": 60, "h": 60}
+    if _overlap(block, bar, pad):        return False
+    if buffet and _overlap(block, buffet, pad): return False
+    if _overlap(block, door):            return False
+    if _overlap(block, dock):            return False
+    return True
+
+
+def _first_fitting(cands, bar, buffet, entrance):
+    """
+    Eerste plaatsing die niet botst, anders niets.
+
+    Op wandniveau redeneren was te grof: staan bar en buffet tegenover elkaar,
+    dan blijft er geen hoek over met twee vrije wanden en werd 59% van de
+    L-vormen alsnog een kale rechthoek. Direct op de meubelrechthoeken toetsen
+    laat veel meer plaatsingen toe.
+    """
+    for c in cands:
+        if _fits(c, bar, buffet, entrance):
+            return [c]
     return []
+
+
+def _blocks_for(kind, w, h, rng, bar, buffet, entrance):
+    """
+    De vloer die dit archetype wegneemt, geplaatst waar het meubilair niet staat.
+
+    Een zaal snijdt zijn hoek in het echt ook niet weg op de plek waar de tap
+    zit, en een podium staat niet in de deuropening.
+    """
+    if kind == "kolommen":
+        # Dragende kolommen in een raster: midden in de zaal, verplaatsen zich
+        # niet. Het meest genoemde praktijkprobleem. Botsende kolommen vallen
+        # gewoon af; de rest blijft staan.
+        cols, rows = int(rng.integers(2, 4)), int(rng.integers(1, 3))
+        size = int(rng.integers(26, 40))
+        out = [{"x": int(w * (i + 1) / (cols + 1) - size / 2),
+                "y": int(h * (j + 1) / (rows + 1) - size / 2),
+                "w": size, "h": size}
+               for i in range(cols) for j in range(rows)]
+        return [b for b in out if _fits(b, bar, buffet, entrance, pad=10)]
+
+    if kind == "l-vorm":
+        # Past de grote hoek niet, probeer een kleinere voordat we het opgeven:
+        # een ondiepe knik is nog altijd een L-vorm, een kale rechthoek niet.
+        for scale in (1.0, 0.75, 0.55):
+            bw = int(w * rng.uniform(0.24, 0.34) * scale)
+            bh = int(h * rng.uniform(0.24, 0.34) * scale)
+            corners = [{"x": 0, "y": 0, "w": bw, "h": bh},
+                       {"x": w - bw, "y": 0, "w": bw, "h": bh},
+                       {"x": 0, "y": h - bh, "w": bw, "h": bh},
+                       {"x": w - bw, "y": h - bh, "w": bw, "h": bh}]
+            rng.shuffle(corners)
+            got = _first_fitting(corners, bar, buffet, entrance)
+            if got:
+                return got
+        return []
+
+    if kind == "nis":
+        t = 40
+        cands = [{"x": 0, "y": int(h * f), "w": int(w * 0.55), "h": t} for f in (0.30, 0.62)]
+        cands += [{"x": int(w * 0.45), "y": int(h * f), "w": int(w * 0.55), "h": t} for f in (0.30, 0.62)]
+        cands += [{"x": int(w * f), "y": 0, "w": t, "h": int(h * 0.55)} for f in (0.30, 0.62)]
+        cands += [{"x": int(w * f), "y": int(h * 0.45), "w": t, "h": int(h * 0.55)} for f in (0.30, 0.62)]
+        rng.shuffle(cands)
+        return _first_fitting(cands, bar, buffet, entrance)
+
+    if kind == "podium":
+        d = int(min(w, h) * rng.uniform(0.16, 0.24))
+        cands = [{"x": int(w*0.25), "y": 0,     "w": int(w*0.50), "h": d},
+                 {"x": int(w*0.25), "y": h - d, "w": int(w*0.50), "h": d},
+                 {"x": 0,     "y": int(h*0.25), "w": d, "h": int(h*0.50)},
+                 {"x": w - d, "y": int(h*0.25), "w": d, "h": int(h*0.50)}]
+        rng.shuffle(cands)
+        return _first_fitting(cands, bar, buffet, entrance)
+
+    return []
+
+
+def _clean_blocks(blocks, bar, buffet, entrance):
+    """
+    Gooit blokken weg die op meubilair of de deur staan.
+
+    Een dragende kolom staat niet middenin de bar en niet in de deuropening.
+    Zonder deze filter kreeg 16% van de zalen een kolom in de bar, 13% een in
+    het buffet en 10% een deur die in meubilair viel -- en die laatste gaf
+    honderden mislukte gastroutes per run, die door merge_shards heen glippen
+    omdat dat alleen op OBERroutes filtert.
+    """
+    dock = {"x": bar["dock"]["x"] - 30, "y": bar["dock"]["y"] - 30, "w": 60, "h": 60}
+    door = {"x": entrance["x"] - 55, "y": entrance["y"] - 45, "w": 110, "h": 90}
+    keep = []
+    for b in blocks:
+        if _overlap(b, bar, pad=20):     continue
+        if buffet and _overlap(b, buffet, pad=20): continue
+        if _overlap(b, dock):            continue
+        if _overlap(b, door):            continue
+        keep.append(b)
+    return keep
 
 
 def make_room(rng, kind=None):
@@ -174,14 +240,22 @@ def make_room(rng, kind=None):
     ent_choices = [x for x in rest if x != buffet_wall] or rest
     ent_wall    = ent_choices[int(rng.integers(0, len(ent_choices)))]
 
+    bar      = _bar_on_wall(w, h, bar_wall, rng)
+    buffet   = _buffet_on_wall(w, h, buffet_wall, rng) if has_buffet else None
+    entrance = _entrance_on_wall(w, h, ent_wall)
+    # Een smalle langwerpige zaal kan bar en buffet laten overlappen; dan gaat
+    # het buffet eruit in plaats van er half in te staan.
+    if buffet and _overlap(bar, buffet, pad=10):
+        buffet = None
+    blocks = _blocks_for(kind, w, h, rng, bar, buffet, entrance)
     return {
         "kind":     kind,
         "w":        w,
         "h":        h,
-        "bar":      _bar_on_wall(w, h, bar_wall, rng),
-        "buffet":   _buffet_on_wall(w, h, buffet_wall, rng) if has_buffet else None,
-        "entrance": _entrance_on_wall(w, h, ent_wall),
-        "blocks":   _blocks_for(kind, w, h, rng),
+        "bar":      bar,
+        "buffet":   buffet,
+        "entrance": entrance,
+        "blocks":   blocks,
         "bar_wall": bar_wall,
     }
 
@@ -222,7 +296,8 @@ def table_mix_for(free_area):
 CLASSIC = {
     "kind": "rechthoek", "w": 640, "h": 640,
     "bar":      {"x": 550, "y": 50, "w": 70, "h": 540, "dock": {"x": 530, "y": 80}},
-    "buffet":   {"x": 20, "y": 170, "w": 60, "h": 300, "slots": 3, "wall": "links"},
+    "buffet":   {"x": 20, "y": 170, "w": 60, "h": 300, "slots": 3,
+                 "dwellRange": [45, 90], "wall": "links"},
     "entrance": {"x": 48, "y": 586},
     "blocks":   [],
     "bar_wall": "rechts",

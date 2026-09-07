@@ -292,10 +292,19 @@ def layout_valid(blocked, tables, n_waiters=3, room=CLASSIC):
             trapped += 1
 
     def in_floor(p):
-        cell = nearest_open(blocked, p, radius=5)
+        # Radius 3, net als nearestOpenPoint(p, 3) in simulatie.html voor
+        # service- en buffetpunten. Met 5 snapte de spiegel verder dan de
+        # simulator en keurde hij indelingen goed die de browser afkeurt --
+        # altijd die kant op, dus precies de kant die de optimizerpoort
+        # laat doorglippen.
+        cell = nearest_open(blocked, p, radius=3)
         return cell is not None and int(label[cell]) == floor
 
-    if sizes[floor] < 10 or not in_floor(dock):
+    def dock_in_floor(p):
+        cell = nearest_open(blocked, p, radius=5)     # de dock snapt wel op 5
+        return cell is not None and int(label[cell]) == floor
+
+    if sizes[floor] < 10 or not dock_in_floor(dock):
         return False, len(tables), trapped
 
     # Spiegel van de buffettoets in simulatie.html: een indeling die de
@@ -419,6 +428,40 @@ def buffet_slot_points(room=CLASSIC):
     buffetSlotPoints() in simulatie.html. Gedeeld met rooms.py zodat er maar
     een definitie bestaat."""
     return _room_slot_points(room.get("buffet"))
+
+
+MIN_TABLE_GAP = 50      # zelfde corridor als generate_batch (MIN_CORR)
+
+
+def min_table_gap(tables):
+    """
+    Kleinste vrije ruimte tussen twee tafels. Negatief betekent overlap.
+
+    generate_batch dwingt een corridor van 50 px af, maar local_refine
+    verschoof 500 rondes lang tafels van +-35 px zonder enige toets. Drie
+    tafels op elkaar stapelen verlaagt waiterDist met bijna 40% -- de obers
+    lopen dan naar een punt in plaats van naar een zaal -- en niets keurde dat
+    af. Vierde exploit van dit soort in dit project; deze toets sluit hem.
+    """
+    n = len(tables)
+    if n < 2:
+        return float("inf")
+    boxes = [table_aabb(normalise_table(t)) for t in tables]
+    worst = float("inf")
+    for i in range(n):
+        ax, ay, aw, ah = boxes[i]
+        for j in range(i + 1, n):
+            bx, by, bw, bh = boxes[j]
+            gx = max(bx - (ax + aw), ax - (bx + bw))
+            gy = max(by - (ay + ah), ay - (by + bh))
+            # Overlappen ze op beide assen, dan is de "afstand" de diepste
+            # doordringing (negatief); anders de grootste vrije as.
+            worst = min(worst, max(gx, gy))
+    return worst
+
+
+def tables_ok(tables, min_gap=MIN_TABLE_GAP):
+    return min_table_gap(tables) >= min_gap
 
 
 def overlaps_buffet(tables, room=CLASSIC):

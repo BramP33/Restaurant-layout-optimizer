@@ -281,6 +281,8 @@ def _score_layouts(model, feat_len, layouts, frontier=False, room=CLASSIC):
         ok, _unreachable, _trapped = pg.layout_valid(pg.build_blocked(var, room), var, room=room)
         if ok and pg.overlaps_buffet(var, room):
             ok = False          # bereikbaar maar fysiek onmogelijk
+        if ok and not pg.tables_ok(var):
+            ok = False          # tafels door elkaar heen: zie pg.min_table_gap
         if ok:
             keep.append(i)
             rows.append(extract_features(layout, frontier=frontier, room=room))
@@ -291,7 +293,7 @@ def _score_layouts(model, feat_len, layouts, frontier=False, room=CLASSIC):
 
 # ── Random search ─────────────────────────────────────────────────────────────
 
-def random_search(model, feat_len, n_candidates, rng, batch=50_000, room=CLASSIC):
+def random_search(model, feat_len, n_candidates, rng, batch=50_000, room=CLASSIC, types=None):
     print(f"Fase 1 — random search ({n_candidates:,} kandidaten)…")
     t0 = time.time()
 
@@ -300,7 +302,7 @@ def random_search(model, feat_len, n_candidates, rng, batch=50_000, room=CLASSIC
 
     while generated < n_candidates:
         size             = min(batch, n_candidates - generated)
-        layouts, hit     = generate_batch(size, rng, room=room)
+        layouts, hit     = generate_batch(size, rng, room=room, types=types)
         generated       += size
 
         if not layouts:
@@ -362,6 +364,12 @@ def local_refine(model, feat_len, candidates, scores, top_k, n_rounds, rng,
                 continue
             new_layout      = [dict(t2) for t2 in layout]
             new_layout[idx] = {**t, "x": nx, "y": ny}
+            # Zonder deze toets schuift de verfijning tafels dwars door elkaar
+            # heen. Dat verlaagt waiterDist met bijna 40% -- de obers lopen dan
+            # naar een punt in plaats van naar een zaal -- terwijl de
+            # bereikbaarheidstoets het gewoon goedkeurt.
+            if not pg.tables_ok([q for q in new_layout if q.get("size") != "custom"]):
+                continue
             perturbed.append(new_layout)
             origins.append(ci)
 
@@ -424,7 +432,7 @@ def gradient_search(gnn_model, candidates, scores, top_k=10, steps=500):
 
 # ── Export ────────────────────────────────────────────────────────────────────
 
-def export(layouts, pred_scores, out_path, top_n, room=CLASSIC):
+def export(layouts, pred_scores, out_path, top_n, room=CLASSIC, mix=None):
     results = []
     for rank, (layout, sc) in enumerate(zip(layouts[:top_n], pred_scores[:top_n])):
         results.append({
@@ -432,8 +440,11 @@ def export(layouts, pred_scores, out_path, top_n, room=CLASSIC):
             "predicted_waiterDist": round(float(sc)),
             "predicted_score":      round(-float(sc) * 0.02 + 421 * 12, 1),
             "config": {"room": room, "roomW": room["w"], "roomH": room["h"],
-                       "guests": 49, "waiters": 3,
-                       "tSmall": 0, "tMedium": 6, "tLarge": 2, "partyType": "buffet"},
+                       "guests": (mix or {}).get("guests", 49), "waiters": 3,
+                       "tSmall": 0,
+                       "tMedium": (mix or {}).get("tMedium", 6),
+                       "tLarge":  (mix or {}).get("tLarge", 2),
+                       "partyType": "buffet"},
             "tables": layout,
         })
     with open(out_path, "w") as f:
@@ -470,6 +481,13 @@ if __name__ == "__main__":
               f"bar {room['bar_wall']}, {len(room['blocks'])} blokken")
     else:
         room = CLASSIC
+    # De tafelmix hoort bij de zaal, en de verzamelaar gebruikt fit_table_mix.
+    # Zonder dezelfde mix zoekt de optimizer in een andere zaal dan waarop het
+    # model getraind is -- en in een krappe zaal levert de ongekrompen mix nul
+    # plaatsbare kandidaten op.
+    _types, _mix = fit_table_mix(room, np.random.default_rng(cfg.get("room_seed") or 0))
+    print(f"Tafelmix: {_mix['tLarge']}L+{_mix['tMedium']}M "
+          f"({_mix['seats']} zitplaatsen, {_mix['guests']} gasten)")
     rng = np.random.default_rng(42)
 
     # ── RF laden voor hoofdoptimalisatie ──
@@ -507,7 +525,8 @@ if __name__ == "__main__":
     # uren. De verfijning draait op het frontier-model: daar zitten we in de
     # kopgroep, en juist daar tillen die features de rangschikking omhoog
     # (rho 0,392 -> 0,427 tegen een achtergehouden seed).
-    layouts, scores = random_search(model, feat_len, cfg["candidates"], rng, room=room)
+    layouts, scores = random_search(model, feat_len, cfg["candidates"], rng,
+                                    room=room, types=_types)
 
     if model_frontier is not None:
         print(f"\nFrontier-model: {feat_len_frontier} features "
@@ -528,4 +547,5 @@ if __name__ == "__main__":
                                           top_k=min(5, len(layouts)),
                                           steps=150)
 
-    export(layouts, scores, ROOT / "optimizer-results.json", top_n=cfg["top"], room=room)
+    export(layouts, scores, ROOT / "optimizer-results.json", top_n=cfg["top"],
+           room=room, mix=_mix)

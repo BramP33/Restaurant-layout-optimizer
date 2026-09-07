@@ -167,7 +167,12 @@ def load_data(path):
     return X, y, w, max_len, meta_rows, var_rows
 
 
-N_TABLE_SLOTS = 8      # vaste lengte voor per-tafel blokken
+# Vaste lengte voor per-tafel blokken. Twaalf, niet acht: sinds de tafelmix
+# met de zaal meeschaalt loopt het aantal van 3 tot 11. Met acht sloten viel
+# bijna een kwart van de zalen buiten de vector -- en de gesorteerde
+# afstandsvector houdt de DICHTSTBIJZIJNDE acht, dus juist de dure tafels
+# vielen weg.
+N_TABLE_SLOTS = 12
 
 
 def room_features(room):
@@ -230,6 +235,17 @@ def extract_features_from_list(variable, room=CLASSIC):
         a = list(arr)[:N_TABLE_SLOTS]
         return a + [fill] * (N_TABLE_SLOTS - len(a))
 
+    def fixed_far(arr):
+        """
+        Zelfde, maar vult aan met de VERSTE waarde in plaats van nul.
+
+        Een ontbrekende tafel aanvullen met 0 leest als een tafel pal naast de
+        bar -- de gunstigst mogelijke waarde. Aanvullen met de verste maakt van
+        "die tafel is er niet" iets neutraals in plaats van iets goeds.
+        """
+        a = sorted(arr)[:N_TABLE_SLOTS]
+        return a + [a[-1] if a else 0.0] * (N_TABLE_SLOTS - len(a))
+
     # Positie en afmeting per tafel, genormaliseerd op de zaal.
     raw = []
     for t in fixed(variable, None):
@@ -284,9 +300,13 @@ def extract_features_from_list(variable, room=CLASSIC):
     min_gap_bar = min(gaps_bar) if gaps_bar else 0.0
 
     eng = [
+        # Hoeveel tafels er staan is nu een variabele: de mix schaalt met de
+        # zaal. Zonder deze twee moet het model het terugrekenen uit sommen, en
+        # leest een opgevulde plek als een echte tafel.
+        float(n), float(n) / N_TABLE_SLOTS,
         bar_dists.mean(), bar_dists.min(), bar_dists.max(),
         bar_dists.std(),  bar_dists.sum(),
-        *fixed(np.sort(bar_dists)),
+        *fixed_far(bar_dists),
         cx_n.mean(), cy_n.mean(), cx_n.std(), cy_n.std(),
         diffs.mean(), diffs.std(), diffs.min(), diffs.max(),
         bar_side, centroid_to_bar, diffs.mean(),
