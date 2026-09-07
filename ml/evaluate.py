@@ -79,7 +79,7 @@ def report():
         def _calib(model, feat_len, frontier):
             errs = [(float(model.predict(_features(v["tables"], feat_len,
                                                    frontier=frontier,
-                                                   room=(v.get("config") or {}).get("room"))))[0]
+                                                   room=(v.get("config") or {}).get("room")))[0])
                      - v["actual_dist"]) / v["actual_dist"]
                     for v in val if "tables" in v]
             return (float(np.mean(errs)) * 100, len(errs)) if errs else (None, 0)
