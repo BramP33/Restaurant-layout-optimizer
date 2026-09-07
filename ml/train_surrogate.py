@@ -309,11 +309,22 @@ def extract_features_from_list(variable, room=CLASSIC):
         gaps_bar.append(math.hypot(dx, dy) / diag)
     min_gap_bar = min(gaps_bar) if gaps_bar else 0.0
 
+    # Zitplaatsen en belasting. Een zaal met kolommen krijgt stelselmatig
+    # minder tafels per m2 vrije vloer -- die vloer ligt daar in losse stukken
+    # waar geen tafel in past. Dat is echte meetkunde, maar zonder deze
+    # features ziet het model alleen "kolommen" en niet "licht belast", en dan
+    # verdunt precies het signaal waarvoor de zaalvariatie bestaat.
+    seats = sum(int(pg.normalise_table(t).get("seats", 4)) for t in variable)
+    free_cells = float((~pg.build_blocked(variable, room)).sum())
+    free_area  = free_cells * pg.CELL ** 2
+    load = seats / (free_area / 1e5) if free_area > 0 else 0.0
+
     eng = [
         # Hoeveel tafels er staan is nu een variabele: de mix schaalt met de
         # zaal. Zonder deze twee moet het model het terugrekenen uit sommen, en
         # leest een opgevulde plek als een echte tafel.
         float(n), float(n) / N_TABLE_SLOTS,
+        float(seats), load,
         bar_dists.mean(), bar_dists.min(), bar_dists.max(),
         bar_dists.std(),  bar_dists.sum(),
         *fixed_far(bar_dists),

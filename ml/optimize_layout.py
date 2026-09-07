@@ -104,7 +104,10 @@ def placement_ok(tables, room=CLASSIC):
     Voldoet deze indeling aan dezelfde plaatsingsregels als de generator?
 
     Toetst tafel tegen tafel, tegen de bar, tegen de deurzone, tegen de
-    buffetlijn met looppad, tegen de kolommen en tegen de wandmarge. De
+    buffetlijn met looppad en tegen de kolommen. NIET tegen de wandmarge: die
+    hanteert de generator op de opslagpositie van de tafel en niet op de
+    geroteerde AABB, en `local_refine` bewaakt hem met diezelfde conventie.
+    Wie deze functie elders gebruikt moet die grenscontrole zelf meenemen. De
     verfijning kende alleen de eerste, en schoof daardoor tafels dwars de bar
     in: layoutValid bleef true, clipEvents 0, oberroutes 0, en waiterDist zakte
     tot 46% -- langs alle poorten en beide datafilters heen.
@@ -453,7 +456,7 @@ def local_refine(model, feat_len, candidates, scores, top_k, n_rounds, rng,
 
 # ── Gradient search (alleen voor GNN) ────────────────────────────────────────
 
-def gradient_search(gnn_model, candidates, scores, top_k=10, steps=500):
+def gradient_search(gnn_model, candidates, scores, top_k=10, steps=500, room=CLASSIC):
     """
     Gradiëntgebaseerde verfijning van de top-k kandidaten via de GNN.
     Retourneert de verfijnde layouts gesorteerd op voorspelde waiterDist.
@@ -467,7 +470,13 @@ def gradient_search(gnn_model, candidates, scores, top_k=10, steps=500):
     print(f"\nFase 3 — gradient search (top-{top_k}, {steps} stappen per layout)…")
     t0 = time.time()
 
-    config = {"roomW": ROOM_W, "roomH": ROOM_H, "guests": 49, "waiters": 3}
+    # LET OP: dit pad slaat _score_layouts over en dus ook placement_ok en de
+    # bereikbaarheidspoort. Zolang het slaapt (torch ontbreekt, en er staat een
+    # R2>0,55-drempel op) is dat onschadelijk, maar wie het aanzet moet elke
+    # uitkomst alsnog door placement_ok halen -- anders staat de exploit die
+    # tafels de bar in schoof meteen weer open. De zaal komt bovendien uit de
+    # aanroep en niet uit de klassieke constanten.
+    config = {"roomW": room["w"], "roomH": room["h"], "guests": 49, "waiters": 3}
     refined_layouts, refined_scores = [], []
 
     for i in range(min(top_k, len(candidates))):
@@ -480,6 +489,8 @@ def gradient_search(gnn_model, candidates, scores, top_k=10, steps=500):
                 n_steps=steps,
                 lr=1.0,
             )
+            if not placement_ok(opt_layout, room):
+                continue          # gradiëntstap mag geen illegale plaatsing opleveren
             sc = gnn_model.predict([opt_layout], config=config)[0]
             refined_layouts.append(opt_layout)
             refined_scores.append(sc)
@@ -608,7 +619,7 @@ if __name__ == "__main__":
 
     # ── Gradiëntoptimalisatie met GNN (als beschikbaar en goed genoeg) ──
     if gnn_model is not None:
-        layouts, scores = gradient_search(gnn_model, layouts, scores,
+        layouts, scores = gradient_search(gnn_model, layouts, scores, room=room,
                                           top_k=min(5, len(layouts)),
                                           steps=150)
 
