@@ -30,6 +30,10 @@ from rooms import CLASSIC                                       # noqa: E402
 ROOM_W = CLASSIC["w"]
 ROOM_H = CLASSIC["h"]
 WALL_MARGIN   = 20
+# Looppad aan de zaalkant van het buffet. Ongeveer 20 px is een meter (een
+# tafel voor vier is 80 px breed), dus 36 px ~ 1,8 m -- ruim genoeg om langs
+# een wachtende rij te lopen; de cateringvuistregel is minimaal ~1,2 m.
+WALKWAY_PX    = 36
 MIN_CORR      = 50
 HALF_CORR     = 25
 
@@ -69,6 +73,72 @@ def _aabb_scalar(x, y, w, h, rot):
 #
 # Hit rate ~35–50%. Met N=100k per batch → ~40k geldige layouts per batch.
 
+def fixed_obstacles(room):
+    """
+    Alles wat vast staat en waar dus geen tafel bij mag: buffetlijn met
+    looppad, en de kolommen/podia/hoeken.
+
+    Eén definitie, gebruikt door zowel de kandidaatgenerator als de
+    verfijningstoets. Dat generate_batch deze regels wel kende en local_refine
+    niet, is precies hoe drie tafels in de bar konden belanden.
+    """
+    out = []
+    bf = room.get("buffet")
+    if bf:
+        wall = bf.get("wall", "links")
+        x, y = bf["x"] - 8, bf["y"] - 8
+        w, h = bf["w"] + 16, bf["h"] + 16
+        if wall == "links":     w += WALKWAY_PX
+        elif wall == "rechts":  x -= WALKWAY_PX; w += WALKWAY_PX
+        elif wall == "boven":   h += WALKWAY_PX
+        else:                   y -= WALKWAY_PX; h += WALKWAY_PX
+        out.append((x, y, w, h))
+    for b in room.get("blocks", []):
+        out.append((b["x"] - 8, b["y"] - 8, b["w"] + 16, b["h"] + 16))
+    return out
+
+
+def placement_ok(tables, room=CLASSIC):
+    """
+    Voldoet deze indeling aan dezelfde plaatsingsregels als de generator?
+
+    Toetst tafel tegen tafel, tegen de bar, tegen de deurzone, tegen de
+    buffetlijn met looppad, tegen de kolommen en tegen de wandmarge. De
+    verfijning kende alleen de eerste, en schoof daardoor tafels dwars de bar
+    in: layoutValid bleef true, clipEvents 0, oberroutes 0, en waiterDist zakte
+    tot 46% -- langs alle poorten en beide datafilters heen.
+    """
+    var = [t for t in tables if t.get("size") != "custom"]
+    if not var:
+        return True
+    if not pg.tables_ok(var):
+        return False
+
+    b = room["bar"]
+    e = room["entrance"]
+    boxes = [pg.table_aabb(pg.normalise_table(t)) for t in var]
+
+    def clash(box, rx, ry, rw, rh, gx, gy):
+        ax, ay, aw, ah = box
+        return (ax < rx + rw + gx and ax + aw + gx > rx and
+                ay < ry + rh + gy and ay + ah + gy > ry)
+
+    # De wandmarge zit hier bewust NIET in. generate_batch legt hem op de
+    # opslagpositie van de tafel, niet op de geroteerde AABB; bij een gedraaide
+    # tafel scheelt dat 10 px en dan zou deze toets strenger zijn dan de
+    # generator die de trainingsdata heeft gemaakt. local_refine bewaakt de
+    # grenzen al met dezelfde conventie als de generator.
+    for ax, ay, aw, ah in boxes:
+        if clash((ax, ay, aw, ah), b["x"], b["y"], b["w"], b["h"], HALF_CORR, HALF_CORR):
+            return False
+        if clash((ax, ay, aw, ah), e["x"] - 55, e["y"] - 45, 110, 90, MIN_CORR, HALF_CORR):
+            return False
+        for rx, ry, rw, rh in fixed_obstacles(room):
+            if clash((ax, ay, aw, ah), rx, ry, rw, rh, MIN_CORR, MIN_CORR):
+                return False
+    return True
+
+
 def _collision_ok(ax, ay, aw, ah, placed, room=CLASSIC):
     """(N,) bool — True als positie (ax,ay,aw,ah) vrij is van alle geplaatste items."""
     b = room["bar"]
@@ -102,7 +172,18 @@ def room_table_types(room):
     return ["large"] * mix["tLarge"] + ["medium"] * mix["tMedium"], mix
 
 
-def fit_table_mix(room, rng, min_yield=0.25, probe_n=120):
+def _room_seed(room):
+    """Stabiele seed uit de zaalgeometrie, zodat dezelfde zaal altijd dezelfde
+    tafelmix krijgt. Zonder dit hing het gastenaantal af van de toevallige
+    trefkans van de sampler, en gaf dezelfde zaal bij een andere seed soms een
+    ander aantal gasten."""
+    b = room["bar"]
+    key = (room.get("kind", "?"), room["w"], room["h"], b["x"], b["y"],
+           tuple(sorted((x["x"], x["y"], x["w"], x["h"]) for x in room.get("blocks", []))))
+    return abs(hash(repr(key))) % (2 ** 31)
+
+
+def fit_table_mix(room, rng=None, min_yield=0.25, probe_n=120):
     """
     Krimpt de tafelmix tot hij ook echt past.
 
@@ -112,9 +193,12 @@ def fit_table_mix(room, rng, min_yield=0.25, probe_n=120):
     plaatsingsopbrengst naar nul. Dus: begin bij wat de norm zegt en haal er
     tafels af tot het lukt.
     """
+    # De probe draait op een seed uit de zaal zelf, niet op de meegegeven rng:
+    # de mix hoort een eigenschap van de zaal te zijn, niet van het toeval.
+    probe_rng = np.random.default_rng(_room_seed(room))
     types, mix = room_table_types(room)
     while len(types) > 3:
-        batch, _ = generate_batch(probe_n, rng, room=room, types=types)
+        batch, _ = generate_batch(probe_n, probe_rng, room=room, types=types)
         if len(batch) / probe_n >= min_yield:
             break
         # Eerst de middelgrote weghalen; de grote tafels dragen de meeste
@@ -139,34 +223,10 @@ def generate_batch(N, rng, max_tries=200, room=CLASSIC, types=None):
     # Zonder dit blok stelt de optimizer indelingen voor met een tafel midden
     # in het buffet -- geldig volgens de bereikbaarheidstoets, onzin in het
     # echt.
-    # Looppad aan de zaalkant van het buffet. In deze zaal is ~20 px ongeveer
-    # een meter (een tafel voor vier is 80 px breed), dus 36 px ~ 1,8 m -- ruim
-    # genoeg om langs een wachtende rij te lopen, en de vuistregel uit de
-    # cateringpraktijk is minimaal ~1,2 m.
-    WALKWAY_PX = 36
-    _bf = room.get("buffet")
     placed = []
-    if _bf:
-        # Looppad aan de ZAALkant van de lijn, niet altijd rechts.
-        wall = _bf.get("wall", "links")
-        bx0, by0 = _bf["x"] - 8, _bf["y"] - 8
-        bw0, bh0 = _bf["w"] + 16, _bf["h"] + 16
-        if wall == "links":     bw0 += WALKWAY_PX
-        elif wall == "rechts":  bx0 -= WALKWAY_PX; bw0 += WALKWAY_PX
-        elif wall == "boven":   bh0 += WALKWAY_PX
-        else:                   by0 -= WALKWAY_PX; bh0 += WALKWAY_PX
-        placed.append((np.full(N, bx0, np.float32), np.full(N, by0, np.float32),
-                       np.full(N, bw0, np.float32), np.full(N, bh0, np.float32)))
-    # Kolommen, podia en dichtgezette hoeken.
-    for blk in room.get("blocks", []):
-        placed.append((np.full(N, blk["x"] - 8, np.float32), np.full(N, blk["y"] - 8, np.float32),
-                       np.full(N, blk["w"] + 16, np.float32), np.full(N, blk["h"] + 16, np.float32)))
-    # FIXED_TABLES staan hier bewust NIET meer bij. Die drie "custom" tafels
-    # komen nooit op de vloer -- validate_headless.js filtert ze weg en
-    # simulatie.html plaatst ze alleen uit localStorage -- dus ze mijden was
-    # het ontwijken van meubilair dat niet bestaat. Het sloot ongeveer 46% van
-    # de plaatsingsruimte af zonder enige reden.
-
+    for _rx, _ry, _rw, _rh in fixed_obstacles(room):
+        placed.append((np.full(N, _rx, np.float32), np.full(N, _ry, np.float32),
+                       np.full(N, _rw, np.float32), np.full(N, _rh, np.float32)))
     result_xs = np.zeros((N, T), np.float32)
     result_ys = np.zeros((N, T), np.float32)
     alive     = np.ones(N, dtype=bool)
@@ -281,8 +341,8 @@ def _score_layouts(model, feat_len, layouts, frontier=False, room=CLASSIC):
         ok, _unreachable, _trapped = pg.layout_valid(pg.build_blocked(var, room), var, room=room)
         if ok and pg.overlaps_buffet(var, room):
             ok = False          # bereikbaar maar fysiek onmogelijk
-        if ok and not pg.tables_ok(var):
-            ok = False          # tafels door elkaar heen: zie pg.min_table_gap
+        if ok and not placement_ok(layout, room):
+            ok = False          # botst met tafels, bar, deur, buffet of kolom
         if ok:
             keep.append(i)
             rows.append(extract_features(layout, frontier=frontier, room=room))
@@ -368,7 +428,7 @@ def local_refine(model, feat_len, candidates, scores, top_k, n_rounds, rng,
             # heen. Dat verlaagt waiterDist met bijna 40% -- de obers lopen dan
             # naar een punt in plaats van naar een zaal -- terwijl de
             # bereikbaarheidstoets het gewoon goedkeurt.
-            if not pg.tables_ok([q for q in new_layout if q.get("size") != "custom"]):
+            if not placement_ok(new_layout, room):
                 continue
             perturbed.append(new_layout)
             origins.append(ci)

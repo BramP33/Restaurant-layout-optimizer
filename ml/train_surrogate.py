@@ -247,10 +247,20 @@ def extract_features_from_list(variable, room=CLASSIC):
         return a + [a[-1] if a else 0.0] * (N_TABLE_SLOTS - len(a))
 
     # Positie en afmeting per tafel, genormaliseerd op de zaal.
+    #
+    # Lege sloten krijgen het GEMIDDELDE van de aanwezige tafels, niet nul.
+    # Sinds de tafelmix met de zaal meeschaalt heeft 99% van de zalen
+    # opvulling, gemiddeld vijf sloten; die met nul vullen zet vijf
+    # fantoomtafels in de linkerbovenhoek en dat is geen neutrale waarde maar
+    # een extreme. Het aantal echte tafels staat als aparte feature in `eng`,
+    # dus het model kan opvulling herkennen.
+    fill = [float(np.mean(cx / W)), float(np.mean(cy / H)),
+            float(np.mean([t.get("rotation", 0) / 90.0 for t in variable])),
+            float(np.mean(cw / diag)), float(np.mean(ch / diag))] if n else [0.0] * 5
     raw = []
     for t in fixed(variable, None):
         if t is None:
-            raw += [0.0, 0.0, 0.0, 0.0, 0.0]
+            raw += fill
         else:
             raw += [t["x"] / W, t["y"] / H, t.get("rotation", 0) / 90.0,
                     t["w"] / diag, t["h"] / diag]

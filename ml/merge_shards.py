@@ -18,6 +18,9 @@ HERE = Path(__file__).parent
 ROOT = HERE.parent
 SHARD_DIR = ROOT / "data" / "shards"
 
+# Boven dit aantal mislukte gastroutes is er iets structureel mis met de zaal.
+MAX_GUEST_FAILURES = 250
+
 
 def room_key(run):
     """
@@ -62,7 +65,7 @@ def main():
         return
 
     runs, seen = [], set()
-    invalid = dupes = failed = 0
+    invalid = dupes = failed = guest_broken = 0
     for f in files:
         try:
             entries = json.loads(f.read_text())
@@ -92,6 +95,15 @@ def main():
                 failed += 1
                 if not args.keep_invalid:
                     continue
+            elif m.get("guestPathFailures", 0) > MAX_GUEST_FAILURES:
+                # Gastroutes mogen best falen -- een stoel achter een muur is
+                # vervelend maar niet exploiteerbaar, en normaal ligt dit rond
+                # de 20 tot 100 per run. Honderden betekent iets structureels,
+                # zoals een deur die in meubilair valt; zulke runs beschrijven
+                # een zaal die niemand zou bouwen.
+                guest_broken += 1
+                if not args.keep_invalid:
+                    continue
             runs.append(r)
 
     out = Path(args.out)
@@ -102,6 +114,8 @@ def main():
     print(f"  runs bewaard      : {len(runs):,}  ({layouts:,} unieke layouts)")
     print(f"  duplicaten weg    : {dupes:,}")
     print(f"  ongeldige layouts : {invalid:,} "
+          f"({'behouden' if args.keep_invalid else 'verwijderd'})")
+    print(f"  gastroutes stuk   : {guest_broken:,} "
           f"({'behouden' if args.keep_invalid else 'verwijderd'})")
     print(f"  oberroute mislukt : {failed:,} "
           f"({'behouden' if args.keep_invalid else 'verwijderd'})")

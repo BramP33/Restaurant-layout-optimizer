@@ -194,28 +194,6 @@ def _blocks_for(kind, w, h, rng, bar, buffet, entrance):
     return []
 
 
-def _clean_blocks(blocks, bar, buffet, entrance):
-    """
-    Gooit blokken weg die op meubilair of de deur staan.
-
-    Een dragende kolom staat niet middenin de bar en niet in de deuropening.
-    Zonder deze filter kreeg 16% van de zalen een kolom in de bar, 13% een in
-    het buffet en 10% een deur die in meubilair viel -- en die laatste gaf
-    honderden mislukte gastroutes per run, die door merge_shards heen glippen
-    omdat dat alleen op OBERroutes filtert.
-    """
-    dock = {"x": bar["dock"]["x"] - 30, "y": bar["dock"]["y"] - 30, "w": 60, "h": 60}
-    door = {"x": entrance["x"] - 55, "y": entrance["y"] - 45, "w": 110, "h": 90}
-    keep = []
-    for b in blocks:
-        if _overlap(b, bar, pad=20):     continue
-        if buffet and _overlap(b, buffet, pad=20): continue
-        if _overlap(b, dock):            continue
-        if _overlap(b, door):            continue
-        keep.append(b)
-    return keep
-
-
 def make_room(rng, kind=None):
     """Trekt een zaal. `rng` is een numpy Generator, zodat de seed doorwerkt."""
     kind = kind or KINDS[int(rng.integers(0, len(KINDS)))]
