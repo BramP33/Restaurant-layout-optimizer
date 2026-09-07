@@ -490,7 +490,13 @@ def gradient_search(gnn_model, candidates, scores, top_k=10, steps=500, room=CLA
                 lr=1.0,
             )
             if not placement_ok(opt_layout, room):
-                continue          # gradiëntstap mag geen illegale plaatsing opleveren
+                # Stap afgekeurd: houd het origineel, net als de except-tak
+                # hieronder. Met `continue` viel de kandidaat helemaal weg, en
+                # sneuvelden alle top-k dan klapte de run pas na de volledige
+                # zoektocht op een lege lijst.
+                refined_layouts.append(layout)
+                refined_scores.append(scores[i])
+                continue
             sc = gnn_model.predict([opt_layout], config=config)[0]
             refined_layouts.append(opt_layout)
             refined_scores.append(sc)

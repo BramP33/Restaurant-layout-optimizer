@@ -54,6 +54,8 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--out", default=str(ROOT / "restaurant-sim-clean.json"))
     p.add_argument("--shards", default=str(SHARD_DIR))
+    p.add_argument("--force", action="store_true",
+                   help="Overschrijf ook als de bestaande dataset veel groter is")
     p.add_argument("--keep-invalid", action="store_true",
                    help="Behoud runs met een onbereikbare bar of tafel")
     args = p.parse_args()
@@ -107,6 +109,23 @@ def main():
             runs.append(r)
 
     out = Path(args.out)
+
+    # Weiger een bestaande, veel grotere dataset te overschrijven. `data/shards`
+    # bevat alleen wat er nu ligt; de eerdere verzamelronde staat elders
+    # gearchiveerd. Wie README-stap 2 letterlijk volgt zou anders tienduizenden
+    # runs kwijtraken zonder enige waarschuwing.
+    if out.exists() and not args.force:
+        try:
+            bestaand = len(json.loads(out.read_text()))
+        except (json.JSONDecodeError, OSError):
+            bestaand = 0
+        if bestaand > 2 * max(len(runs), 1):
+            print(f"GEWEIGERD: {out.name} bevat {bestaand:,} runs, dit zou er "
+                  f"{len(runs):,} van maken.")
+            print("  Staat de vorige verzamelronde nog in data/shards, of is die "
+                  "gearchiveerd?")
+            print("  Weet je het zeker, gebruik dan --force.")
+            return
     out.write_text(json.dumps(runs))
     layouts = len({layout_key(r) for r in runs})
 
