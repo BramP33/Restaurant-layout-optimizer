@@ -12,6 +12,7 @@ Gebruik:
 
 import json
 import sys
+import zlib
 import time
 import numpy as np
 import joblib
@@ -180,7 +181,11 @@ def _room_seed(room):
     b = room["bar"]
     key = (room.get("kind", "?"), room["w"], room["h"], b["x"], b["y"],
            tuple(sorted((x["x"], x["y"], x["w"], x["h"]) for x in room.get("blocks", []))))
-    return abs(hash(repr(key))) % (2 ** 31)
+    # zlib.crc32 en NIET hash(): die is voor strings per proces gerandomiseerd
+    # (PYTHONHASHSEED), dus twee werkers zouden voor dezelfde zaal een andere
+    # tafelmix kunnen kiezen. Precies het soort verschil dat pas opvalt als de
+    # data al verzameld is.
+    return zlib.crc32(repr(key).encode()) % (2 ** 31)
 
 
 def fit_table_mix(room, rng=None, min_yield=0.25, probe_n=120):
