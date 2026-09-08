@@ -111,8 +111,10 @@ def build_pool(n, seed, probe_n=120, min_yield=0.15, min_tables=6):
         if len(types) < min_tables:
             continue
         # Een zaal waar bijna niets in past levert een ronde lang niets op.
-        batch, _ = generate_batch(probe_n, rng, room=room, types=types)
-        yield_ = len(batch) / probe_n
+        # Dit is de MEETKUNDIGE opbrengst (voor de dock-nazeef): een zaal
+        # afkeuren omdat veel indelingen daar een krappe bardock hebben zou
+        # goede zalen uit de pool gooien.
+        batch, yield_ = generate_batch(probe_n, rng, room=room, types=types)
         if yield_ < min_yield:
             continue
         pool.append({"room": room, "types": types, "mix": mix,

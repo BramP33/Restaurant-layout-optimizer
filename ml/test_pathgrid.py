@@ -156,26 +156,48 @@ def test_tour_features():
     import numpy as np
     import pathgrid as pg
 
+    # De ZAAL moet mee. Sinds de dataset meerdere zaalvormen bevat, sloeg deze
+    # test elke layout tegen pathgrid.CLASSIC aan -- een indeling uit een zaal
+    # van 840x508 werd getoetst in een zaal van 640x640, en viel dan terecht om
+    # op "testset moet geldig zijn". De test mat dus niet de tour-features maar
+    # de verkeerde zaal.
+    from train_surrogate import run_room
+
     runs = json.loads((ROOT / "restaurant-sim-clean.json").read_text())
     seen, layouts = set(), []
     for r in runs:
         var = [t for t in r["tables"] if t["size"] != "custom"]
+        if not var:
+            continue
         var.sort(key=lambda t: (-t["w"], t["x"], t["y"]))
-        key = tuple((round(t["x"], 1), round(t["y"], 1), t["size"], t["rotation"]) for t in var)
+        room = run_room(r)
+        key = (room["kind"], room["w"], room["h"],
+               tuple((round(t["x"], 1), round(t["y"], 1), t["size"], t["rotation"])
+                     for t in var))
         if key in seen:
             continue
         seen.add(key)
-        layouts.append(var)
+        layouts.append((var, room))
         if len(layouts) >= 300:
             break
 
-    BIG = 10.0 * pg.ROOM_W
     bad = 0
-    for lay in layouts:
-        assert pg.layout_valid(pg.build_blocked(lay), lay)[0], "testset moet geldig zijn"
-        f = pg.tour_features(lay)
+    for lay, room in layouts:
+        # De strafwaarde is zaalafhankelijk (alle vrije cellen achter elkaar),
+        # dus hij hoort per zaal berekend te worden en niet uit ROOM_W.
+        #
+        # MET de tafels erin, precies zoals tour_features hem zelf berekent.
+        # Op een LEGE zaal ligt de drempel mediaan 28% te hoog, en dan valt de
+        # helft van de wacht dood: een fantoomstraf op de vier
+        # paarafstandsfeatures (12.349 px) zou onder een lege-zaaldrempel van
+        # 15.174 px doorglippen. De test vuurde dan alleen nog op de ritkosten,
+        # die toevallig ~2x de straf optellen.
+        big = float((~pg.build_blocked(lay, room)).sum()) * pg.CELL
+        assert pg.layout_valid(pg.build_blocked(lay, room), lay, room=room)[0], \
+            "testset moet geldig zijn"
+        f = pg.tour_features(lay, room)
         assert len(f) == pg.N_TOUR_FEATURES, f"{len(f)} != {pg.N_TOUR_FEATURES}"
-        if max(f[:4]) >= BIG or f[4] >= BIG:
+        if max(f[:4]) >= big or f[4] >= big:
             bad += 1
 
     print(f"tour_features: {len(layouts)} geldige layouts, {bad} met strafwaarde")

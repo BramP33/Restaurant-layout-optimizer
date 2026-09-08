@@ -38,6 +38,69 @@ WALKWAY_PX    = 36
 MIN_CORR      = 50
 HALF_CORR     = 25
 
+# Serviceruimte rond de bardock: er moet loopruimte overblijven bij het punt
+# waar de ober zijn dienblad haalt.
+#
+# rooms.py hield de dock al vrij van structurele blokken met een 60x60 doos
+# (`_blocks_for`), maar diezelfde bescherming gold nooit voor tafels. Gevolg,
+# gemeten in de diepe verzamelronde: een tafel die de dock inklemt laat alle
+# tafels bereikbaar -- dus de zeef en de poort laten de indeling door -- maar
+# elke rit moet door een spleet. In zaal `langwerpig 840x508` gaf dat 16
+# layouts van 822.000 px tegen een mediaan van 369.000, met omwegen tot 9,4x
+# hemelsbreed (mediaan 6,4x), en een spreiding binnen die zaal van 79.000 px
+# waar de andere zeven op ~20.000 zitten.
+#
+# WAAROM OPENHEID EN NIET AFSTAND. De voor de hand liggende regel -- geen tafel
+# binnen X px van de dock -- is hier geprobeerd en verworpen. Afstand scheidt
+# goed niet van rampzalig: de best gemeten indeling ooit heeft 25,8 px
+# dockruimte, en de zwaarste ramp 26,0 px. Een drempel van 30 px keurde dus de
+# gevalideerde kampioen af, en kostte 15-20% van de zoekruimte in drie zalen
+# die nooit een ramp hadden. Wat wél scheidt is of er nog vloer over is om op
+# te lopen: een tafel naast de dock is prima zolang de doorgang open blijft.
+#
+# Gemeten op 4.920 layouts in 8 zalen, vrije rastercellen binnen DOCK_RADIUS:
+#     rampen        7-10 cellen
+#     kampioen      14
+#     mediaan       20
+# Drempel 11 houdt 95,7% van de layouts over, verwijdert alle 16 rampen en
+# laat alle acht gevalideerde toplayouts staan. De marge is ASYMMETRISCH: 1 cel
+# boven de zwaarste ramp (10) en 3 onder de kampioen (14). Symmetrisch zou 12
+# zijn, maar dat kost `langwerpig 840x508` 21,1% in plaats van 13,9%. De
+# drempel is op deze 16 rampen geijkt; bij een volgende verzamelronde hoort hij
+# opnieuw getoetst te worden -- zeker die ene cel speling aan de rampenkant.
+#
+# De kosten zitten waar het probleem zit: 0% in podium, nis en langwerpig
+# 397x822, 0,9-7,2% in kolommen, l-vorm en de rechthoeken, 13,9% in
+# `langwerpig 840x508`. Die zaal komt er overigens niet mee in de pas -- na
+# de filter houdt hij sd 37.751 px tegen ~20.000 elders, dus de dockklem
+# verklaart ongeveer de helft van zijn overspreiding en de rest niet.
+#
+# Effect op de kopclaim: de winst van de modelkeuze op beste-van-5 zakt met
+# ongeveer 0,04 procentpunt, gepaard gemeten over 10 trekkingsseeds (bereik
+# -0,04 tot +0,12; het kruist nul in 3 van de 10). Dat is niet van nul te
+# onderscheiden. De zorg dat de baseline deels een stroman was omdat er
+# indelingen in zitten die niemand zou bouwen, is dus terecht van aard maar
+# verwaarloosbaar van omvang.
+DOCK_RADIUS    = 54     # 3 rastercellen; door het raster gekozen, niet geijkt
+DOCK_MIN_OPEN  = 11     # vrije cellen binnen die straal
+
+
+def dock_open_ok(tables, room=CLASSIC):
+    """Blijft er loopruimte over bij de bardock?"""
+    free = ~pg.build_blocked([t for t in tables if t.get("size") != "custom"], room)
+    d    = room["bar"]["dock"]
+    h, w = free.shape
+    ys, xs = np.ogrid[0:h, 0:w]
+    # -0.5 omdat build_blocked celmiddelpunten op i*CELL + CELL/2 legt: de
+    # celindex bij wereldcoordinaat X is X/CELL - 0.5. Zonder die term ligt de
+    # schijf een halve cel (9 px) naar rechtsonder, en omdat de dock altijd
+    # vlak voor de bar ligt werkt dat verschillend uit per barwand -- de regel
+    # was tot 4 cellen strenger met de bar rechts of onder dan links of boven.
+    near = ((ys - (d["y"] / pg.CELL - 0.5)) ** 2 +
+            (xs - (d["x"] / pg.CELL - 0.5)) ** 2) <= (DOCK_RADIUS / pg.CELL) ** 2
+    return int((free & near).sum()) >= DOCK_MIN_OPEN
+
+
 FIXED_TABLES = [
     {"size": "custom", "x": 130.59, "y":  57.32, "rotation": 0, "w": 46.85,  "h":  97.69, "seats": 6},
     {"size": "custom", "x": 347.91, "y":  60.81, "rotation": 0, "w": 44.86,  "h":  99.69, "seats": 6},
@@ -132,6 +195,12 @@ def placement_ok(tables, room=CLASSIC):
     # tafel scheelt dat 10 px en dan zou deze toets strenger zijn dan de
     # generator die de trainingsdata heeft gemaakt. local_refine bewaakt de
     # grenzen al met dezelfde conventie als de generator.
+    # Serviceruimte rond de dock. De bartoets hieronder vangt dit niet: de dock
+    # ligt 20 px vóór de bar, dus tafels kunnen 25 px van de bar af staan en de
+    # doorgang naar de dock toch dichtzetten.
+    if not dock_open_ok(var, room):
+        return False
+
     for ax, ay, aw, ah in boxes:
         if clash((ax, ay, aw, ah), b["x"], b["y"], b["w"], b["h"], HALF_CORR, HALF_CORR):
             return False
@@ -153,6 +222,13 @@ def _collision_ok(ax, ay, aw, ah, placed, room=CLASSIC):
     ex, ey, ew, eh = e["x"] - 55, e["y"] - 45, 110, 90
     g, g2 = HALF_CORR, MIN_CORR
 
+    # Serviceruimte rond de bardock -- dezelfde regel als in placement_ok. Die
+    # twee MOETEN gelijk blijven: een generator die ruimer is dan de poort
+    # levert trainingsdata die de poort later afkeurt, en een poort die ruimer
+    # is dan de generator laat de optimizer buiten het getrainde gebied zoeken.
+    # De dock-openheid zit hier NIET in: die is pas te bepalen als alle tafels
+    # staan, en deze functie plaatst er één tegelijk. generate_batch zeeft hem
+    # achteraf, zodat generator en poort toch precies dezelfde regel hanteren.
     ok = (~((ax < bx+bw+g) & (ax+aw+g > bx) & (ay < by+bh+g) & (ay+ah+g > by)) &
           ~((ax < ex+ew+g2) & (ax+aw+g2 > ex) & (ay < ey+eh+g) & (ay+ah+g > ey)))
     for pax, pay, paw, pah in placed:
@@ -206,8 +282,11 @@ def fit_table_mix(room, rng=None, min_yield=0.25, probe_n=120):
     probe_rng = np.random.default_rng(_room_seed(room))
     types, mix = room_table_types(room)
     while len(types) > 3:
-        batch, _ = generate_batch(probe_n, probe_rng, room=room, types=types)
-        if len(batch) / probe_n >= min_yield:
+        # De MEETKUNDIGE opbrengst (voor de dock-nazeef), want de vraag is of
+        # de tafels in de vorm van de zaal passen -- niet of ze een ruime
+        # bardock overhouden.
+        _batch, geom_yield = generate_batch(probe_n, probe_rng, room=room, types=types)
+        if geom_yield >= min_yield:
             break
         # Eerst de middelgrote weghalen; de grote tafels dragen de meeste
         # zitplaatsen en houden de verhouding herkenbaar.
@@ -292,8 +371,26 @@ def generate_batch(N, rng, max_tries=200, room=CLASSIC, types=None):
                            "y": float(result_ys[idx, t_idx]),
                            "rotation": r, "w": td["w"], "h": td["h"],
                            "seats": td["seats"]})
+        # Serviceruimte bij de dock: pas te toetsen met alle tafels op hun
+        # plek, dus hier en niet in _collision_ok. Zo blijft de generator
+        # exact even streng als placement_ok -- een generator die ruimer is
+        # levert trainingsdata die de poort later afkeurt, en een poort die
+        # ruimer is laat de optimizer buiten het getrainde gebied zoeken.
+        if not dock_open_ok(layout, room):
+            continue
         layouts.append(layout)
 
+    # De teruggegeven opbrengst is die VOOR de dock-nazeef, dus puur
+    # meetkundig: past het meubilair in de vorm van deze zaal?
+    #
+    # fit_table_mix en collect_parallel.build_pool beslissen daarop of de
+    # tafelmix moet krimpen of de zaal onbruikbaar is. Zouden ze de opbrengst
+    # NA de nazeef zien, dan leest een kwaliteitsfilter als een
+    # haalbaarheidssignaal: `langwerpig 840x508` zakte daardoor van 9 tafels /
+    # 54 gasten naar 8 / 49, en in 13 van 150 willekeurige zalen kantelde de
+    # mix -- eentje tot op de bodem van drie tafels. Het gastenaantal van een
+    # zaal hoort niet af te hangen van hoeveel indelingen een krappe bardock
+    # hebben.
     return layouts, len(alive_idx) / N
 
 
@@ -366,12 +463,16 @@ def random_search(model, feat_len, n_candidates, rng, batch=50_000, room=CLASSIC
     t0 = time.time()
 
     all_layouts, all_scores = [], []
-    generated = rejected = 0
+    generated = rejected = dock_rejected = 0
 
     while generated < n_candidates:
         size             = min(batch, n_candidates - generated)
         layouts, hit     = generate_batch(size, rng, room=room, types=types)
         generated       += size
+        # `hit` is de opbrengst VOOR de dock-nazeef. Zonder deze regel telt de
+        # logregel niet meer op: de layouts die de nazeef wegneemt staan noch
+        # bij "bereikbaar" noch bij "onbereikbaar afgewezen".
+        dock_rejected   += max(0, int(round(size * hit)) - len(layouts))
 
         if not layouts:
             continue
@@ -383,7 +484,8 @@ def random_search(model, feat_len, n_candidates, rng, batch=50_000, room=CLASSIC
         all_scores.extend(float(scores[i]) for i in keep)
         best = min(all_scores) if all_scores else float("inf")
         print(f"  {generated:>7,} geprobeerd — {len(all_layouts):,} bereikbaar "
-              f"({hit*100:.0f}% plaatsbaar, {rejected:,} onbereikbaar afgewezen) "
+              f"({hit*100:.0f}% plaatsbaar, {dock_rejected:,} krappe bardock, "
+              f"{rejected:,} onbereikbaar afgewezen) "
               f"— beste dist: {best:,.0f}")
 
     order          = np.argsort(all_scores)
