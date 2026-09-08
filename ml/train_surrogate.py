@@ -473,11 +473,18 @@ if __name__ == "__main__":
     model_frontier = LogTargetModel(clone(build_models()[model_name]))
     model_frontier.fit(XF, y, sample_weight=w)
 
+    # De zaal per rij gaat mee. Zonder dat kan de rangschikking BINNEN een zaal
+    # alleen gemeten worden door de volgorde van load_data te reconstrueren uit
+    # de dataset -- een aanname die stilzwijgend fout kan gaan zodra de
+    # aggregatie verandert. En die meting is juist de belangrijke: de globale
+    # rho gaat vooral over welke zaal makkelijk is, niet over welke indeling.
     with open(OOF_FILE, "w") as f:
-        json.dump({"model":   model_name,
-                   "y_true":  y.tolist(),
-                   "y_pred":  best["oof"].tolist(),
-                   "n_seeds": w.tolist()}, f)
+        json.dump({"model":    model_name,
+                   "y_true":   y.tolist(),
+                   "y_pred":   best["oof"].tolist(),
+                   "y_pred_frontier": oof_f.tolist(),
+                   "room_key": [json.dumps(layout_key([], rm)[0]) for _v, rm in variables],
+                   "n_seeds":  w.tolist()}, f)
 
     joblib.dump({
         "model":            model,

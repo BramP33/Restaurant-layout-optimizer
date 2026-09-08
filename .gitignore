@@ -49,3 +49,15 @@ ml/surrogate-oof.json
 # Verzamelde shards (regenereer met ml/collect_parallel.py)
 data/shards/
 restaurant-sim-clean.json
+logs/
+
+# Gearchiveerde shards en datasets van eerdere verzamelrondes.
+# Samen ~568 MB; `git add -A` zou ze anders meenemen.
+data/shards-*/
+restaurant-sim-clean.json.*
+*.bak-*
+data/exp-label-noise-oof.*
+data/room-pool.json
+
+# Losse werkmap, hoort niet in de repo
+De competitie/
