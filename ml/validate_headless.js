@@ -5,9 +5,17 @@
  * layouts, simuleert elk met 5 seeds en schrijft de echte scores naar
  * validation-results.json (bruikbaar voor active learning).
  *
+ * De validatieronde is de enige stap die een browser nodig heeft, en liep
+ * daardoor sequentieel: layout 1 wacht op layout 0, enzovoort. Bij 8 layouts
+ * x 7 seeds duurde dat samen met de modelfase de meerderheid van een job. De
+ * browser zelf ondersteunt prima meerdere pages tegelijk (elke `page` heeft
+ * zijn eigen window/engine), dus --parallel verdeelt de layouts over N pages
+ * in dezelfde browser-instance en simuleert ze gelijktijdig.
+ *
  * Gebruik:
  *   node validate_headless.js
  *   node validate_headless.js --top 5 --seeds 10
+ *   node validate_headless.js --top 20 --seeds 7 --parallel 4
  */
 
 const { chromium } = require('playwright');
@@ -18,6 +26,7 @@ const fs     = require('fs');
 const args    = process.argv.slice(2);
 const TOP     = parseInt(args[args.indexOf('--top')   + 1] || '10');
 const SEEDS   = parseInt(args[args.indexOf('--seeds') + 1] || '5');
+const PARALLEL = Math.max(1, parseInt(args[args.indexOf('--parallel') + 1] || '3'));
 const _inputIdx = args.indexOf('--input');
 const INPUT   = _inputIdx >= 0 ? args[_inputIdx + 1] : null;
 const _outIdx = args.indexOf('--out');
@@ -60,6 +69,8 @@ async function runValidation(page, layout, nSeeds) {
       // pipeline gezelschappen kan varieren. Ontbreekt het, dan vallen de
       // agents terug op POPULATION_DEFAULTS en is het gedrag ongewijzigd.
       if (layout.config && layout.config.population) cfg.population = layout.config.population;
+      // Eigen feestduur (zaalplanner-app); zonder deze regel geldt de duur van het feesttype.
+      if (layout.config && layout.config.durationSec) cfg.durationSec = layout.config.durationSec;
 
       const batch  = new BatchRunner(engine);
       const runs   = [];
@@ -127,6 +138,50 @@ async function runValidation(page, layout, nSeeds) {
   return result;
 }
 
+// Eén page: eigen window/engine, dus volledig onafhankelijk van andere pages
+// in dezelfde browser. Verwerkt zijn deel van de lijst sequentieel (de engine
+// zelf is niet thread-safe), maar meerdere pages draaien gelijktijdig.
+async function openPage(browser) {
+  const page = await browser.newPage();
+  page.on('console', msg => {
+    if (msg.type() === 'error') console.error('Browser error:', msg.text());
+  });
+  await page.goto(SIM_URL, { waitUntil: 'networkidle' });
+  const hasEngine = await page.evaluate(() => !!window.__engine);
+  if (!hasEngine) throw new Error('Engine niet gevonden in pagina-scope');
+  return page;
+}
+
+async function worker(page, items, total, results) {
+  for (const { layout, i } of items) {
+    // Eén console.log per layout, pas na afloop: bij meerdere workers
+    // tegelijk zou een losse write() zonder newline (het "bezig"-bericht)
+    // interleaven met de regel van een andere worker en zowel de console als
+    // main.py's voortgangsparser (die op "Layout #" + "dist=" per regel telt)
+    // in de war sturen.
+    const prefix = `  Layout #${layout.rank} (${i+1}/${total})… `;
+    const t0 = Date.now();
+    try {
+      const result = await runValidation(page, layout, SEEDS);
+      const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+      if (result.error) {
+        console.log(prefix + `FOUT: ${result.error}`);
+      } else {
+        const scoreErr = (result.actual_score - (result.predicted_score ?? 0)).toFixed(0);
+        const distErr  = Math.round(result.actual_dist - (result.predicted_dist ?? 0)).toLocaleString();
+        console.log(prefix +
+                    `actueel score=${result.actual_score.toFixed(0)}  ` +
+                    `dist=${Math.round(result.actual_dist).toLocaleString()} px  ` +
+                    `(fout: score${scoreErr > 0 ? '+' : ''}${scoreErr}, dist${distErr})  ` +
+                    `[${elapsed}s]`);
+        results.push(result);
+      }
+    } catch (err) {
+      console.log(prefix + `UITZONDERING: ${err.message}`);
+    }
+  }
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 (async () => {
   if (!fs.existsSync(OPT_IN)) {
@@ -136,58 +191,32 @@ async function runValidation(page, layout, nSeeds) {
 
   const optResults = JSON.parse(fs.readFileSync(OPT_IN, 'utf8'));
   const toValidate = optResults.slice(0, TOP);
-  console.log(`Valideer top-${toValidate.length} layouts × ${SEEDS} seeds elk`);
+  const nWorkers = Math.min(PARALLEL, Math.max(1, toValidate.length));
+  console.log(`Valideer top-${toValidate.length} layouts × ${SEEDS} seeds elk ` +
+              `(${nWorkers} parallel)`);
   console.log(`Simulator: ${SIM_URL}\n`);
 
   const browser = await chromium.launch({ headless: true });
-  const page    = await browser.newPage();
 
-  // Stille console (geen spam)
-  page.on('console', msg => {
-    if (msg.type() === 'error') console.error('Browser error:', msg.text());
-  });
-
-  console.log('Simulator laden…');
-  await page.goto(SIM_URL, { waitUntil: 'networkidle' });
-
-  // simulatie.html zet window.__engine zelf klaar (zie de haak vlak na
-  // `new SimulationEngine`). Voorheen viste dit script de engine uit een
-  // klik-handler op batchStartBtn; dat werkte, maar brak stil zodra de UI
-  // veranderde en startte ongevraagd een echte batch.
-  const hasEngine = await page.evaluate(() => !!window.__engine);
-  if (!hasEngine) {
-    console.error('Engine niet gevonden in pagina-scope. Controleer of simulatie geladen is.');
+  let pages;
+  try {
+    pages = await Promise.all(Array.from({ length: nWorkers }, () => openPage(browser)));
+  } catch (err) {
+    console.error(err.message + '. Controleer of simulatie geladen is.');
     await browser.close();
     process.exit(1);
   }
 
-  console.log('Engine gevonden. Start validatie…\n');
+  console.log(`${pages.length} engine(s) gevonden. Start validatie…\n`);
 
+  // Ronde-verdeling (i % nWorkers) in plaats van blokken: bij een ongelijk
+  // aantal layouts per worker anders zou de trage worker de wall-clock gaan
+  // bepalen terwijl de andere allang klaar zijn.
   const validationResults = [];
-  for (let i = 0; i < toValidate.length; i++) {
-    const layout = toValidate[i];
-    process.stdout.write(`  Layout #${layout.rank} (${i+1}/${toValidate.length})… `);
-    const t0 = Date.now();
-
-    try {
-      const result = await runValidation(page, layout, SEEDS);
-      const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
-
-      if (result.error) {
-        console.log(`FOUT: ${result.error}`);
-      } else {
-        const scoreErr = (result.actual_score - (result.predicted_score ?? 0)).toFixed(0);
-        const distErr  = Math.round(result.actual_dist - (result.predicted_dist ?? 0)).toLocaleString();
-        console.log(`actueel score=${result.actual_score.toFixed(0)}  ` +
-                    `dist=${Math.round(result.actual_dist).toLocaleString()} px  ` +
-                    `(fout: score${scoreErr > 0 ? '+' : ''}${scoreErr}, dist${distErr})  ` +
-                    `[${elapsed}s]`);
-        validationResults.push(result);
-      }
-    } catch (err) {
-      console.log(`UITZONDERING: ${err.message}`);
-    }
-  }
+  const buckets = Array.from({ length: pages.length }, () => []);
+  toValidate.forEach((layout, i) => buckets[i % pages.length].push({ layout, i }));
+  await Promise.all(buckets.map((items, w) =>
+    worker(pages[w], items, toValidate.length, validationResults)));
 
   await browser.close();
 

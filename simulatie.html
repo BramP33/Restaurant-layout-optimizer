@@ -1466,7 +1466,7 @@ class SimulationEngine {
 
     // Set party type and duration
     this.partyType = PARTY_TYPES[config.partyType] || PARTY_TYPES.buffet;
-    this.partyEndSimTime = this.partyType.durationSec;
+    this.partyEndSimTime = config.durationSec || this.partyType.durationSec;
 
     // Reset state for a clean run; we deliberately preserve bestScore
     // across runs because that's part of the headline metric.
@@ -2868,7 +2868,7 @@ class SimulationEngine {
     this.canvas.width  = config.roomW;
     this.canvas.height = config.roomH;
     this.partyType       = PARTY_TYPES[config.partyType] || PARTY_TYPES.buffet;
-    this.partyEndSimTime = this.partyType.durationSec;
+    this.partyEndSimTime = config.durationSec || this.partyType.durationSec;
     this.simTime  = 0;
     this.runIndex += 1;
     this.guests   = [];
@@ -2917,7 +2917,7 @@ class SimulationEngine {
     this.canvas.width  = config.roomW;
     this.canvas.height = config.roomH;
     this.partyType       = PARTY_TYPES[config.partyType] || PARTY_TYPES.buffet;
-    this.partyEndSimTime = this.partyType.durationSec;
+    this.partyEndSimTime = config.durationSec || this.partyType.durationSec;
     this.simTime  = 0;
     this.runIndex += 1;
     this.guests   = [];

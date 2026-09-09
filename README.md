@@ -353,6 +353,18 @@ wall) — those are reported separately and do not affect waiter distance.
 
 ---
 
+## Zaalplanner app
+
+`app/` contains a browser app for restaurateurs and floor managers: draw your
+own room over a photo of the floor plan (in metres), enter tables, party and
+guests, and get the generated layouts back, each validated in the real
+simulator. A small FastAPI server drives the existing optimizer and headless
+validator. See [app/README.md](app/README.md).
+
+```bash
+app/start.sh      # then open http://localhost:8765
+```
+
 ## Getting started
 
 ### Run the simulator

@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Zaalplanner</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Courier+Prime:wght@400;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+<svg class="defs" width="0" height="0" aria-hidden="true" focusable="false">
+  <filter id="torn" x="-6%" y="-8%" width="112%" height="116%">
+    <feTurbulence type="fractalNoise" baseFrequency="0.035" numOctaves="3" seed="3" result="n" />
+    <feDisplacementMap in="SourceGraphic" in2="n" scale="5" xChannelSelector="R" yChannelSelector="G" />
+  </filter>
+  <filter id="torn2" x="-6%" y="-8%" width="112%" height="116%">
+    <feTurbulence type="fractalNoise" baseFrequency="0.05" numOctaves="2" seed="17" result="n" />
+    <feDisplacementMap in="SourceGraphic" in2="n" scale="4" xChannelSelector="G" yChannelSelector="R" />
+  </filter>
+  <filter id="torn3" x="-6%" y="-8%" width="112%" height="116%">
+    <feTurbulence type="fractalNoise" baseFrequency="0.028" numOctaves="3" seed="41" result="n" />
+    <feDisplacementMap in="SourceGraphic" in2="n" scale="6" xChannelSelector="B" yChannelSelector="R" />
+  </filter>
+</svg>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark"></span>
+    <span class="brand-name">Zaalplanner</span>
+  </div>
+  <div class="project-bar">
+    <select id="projectSelect" class="select" title="Zaal kiezen"></select>
+    <input id="projectName" class="input name" type="text" placeholder="Naam van de zaal" maxlength="60" />
+    <button id="btnNewProject" class="btn ghost" title="Nieuwe zaal">Nieuw</button>
+    <button id="btnDuplicate" class="btn ghost" title="Kopie van deze zaal">Kopie</button>
+    <button id="btnDeleteProject" class="btn ghost danger" title="Deze zaal verwijderen">Verwijder</button>
+  </div>
+  <div class="status-bar">
+    <span id="saveState" class="muted">Opgeslagen</span>
+    <span id="healthDot" class="dot" title="Verbinding met de rekenserver"></span>
+  </div>
+</header>
+
+<main class="workspace">
+
+  <!-- ── Links: invoer ─────────────────────────────────────────────── -->
+  <aside class="panel left">
+
+    <section class="sheet paper-hand tape-tl">
+      <h2><span class="num">1</span>Zaal</h2>
+      <p class="help">Laad een foto of tekening van de plattegrond en teken de vloer eroverheen. Overlappende rechthoeken vormen samen de zaal.</p>
+      <div class="row">
+        <label class="btn letter file">Plattegrond laden<input id="photoInput" type="file" accept="image/*" hidden /></label>
+        <button id="btnRemovePhoto" class="btn ghost" hidden>Foto weg</button>
+      </div>
+      <div id="photoControls" class="stack" hidden>
+        <div class="field">
+          <label for="photoWidth">Breedte foto</label>
+          <div class="unit"><input id="photoWidth" type="number" min="1" max="80" step="0.1" /><span>m</span></div>
+        </div>
+        <div class="field">
+          <label for="photoOpacity">Doorzichtigheid</label>
+          <input id="photoOpacity" type="range" min="0.1" max="1" step="0.05" />
+        </div>
+        <p class="help small">Teken de vloer over de foto en kies daarna de rechthoek: rechts kun je de echte maten invullen en de foto daarop schalen.</p>
+      </div>
+      <dl id="roomInfo" class="facts"></dl>
+    </section>
+
+    <section class="sheet paper-news">
+      <h2><span class="num">2</span>Tafels</h2>
+      <p class="help">Hoeveel tafels van elk type moet de indeling bevatten? Het aantal stoelen volgt daaruit.</p>
+      <div id="tableCounts" class="table-rows"></div>
+      <div class="total"><span>Zitplaatsen</span><strong id="seatTotal">0</strong></div>
+      <details id="customDetails">
+        <summary>Eigen tafeltypes <span id="customCount" class="badge"></span></summary>
+        <p class="help small">Twintig vrije slots voor je eigen tafels en opstellingen. Ze worden bewaard en getekend; de generatie neemt ze mee zodra de simulator ze kent.</p>
+        <div id="customTypes" class="stack"></div>
+        <button id="btnAddCustom" class="btn ghost">Eigen tafel toevoegen</button>
+      </details>
+    </section>
+
+    <section class="sheet paper-card tape-tr">
+      <h2><span class="num">3</span>Feest</h2>
+      <div class="field">
+        <label for="partyType">Type</label>
+        <select id="partyType" class="select">
+          <option value="receptie">Receptie</option>
+          <option value="buffet">Warm-koud buffet</option>
+          <option value="feestavond">Feestavond</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="durationH">Duur</label>
+        <div class="unit"><input id="durationH" type="number" min="1" max="12" step="0.5" /><span>uur</span></div>
+      </div>
+      <div class="field">
+        <label for="guests">Gasten</label>
+        <input id="guests" type="number" min="5" max="200" step="1" />
+      </div>
+      <label class="check"><input id="hasBuffet" type="checkbox" /> Met buffet <span class="help small" id="buffetHint"></span></label>
+      <details>
+        <summary>Geavanceerd</summary>
+        <div class="field">
+          <label for="waiters">Bediening</label>
+          <input id="waiters" type="number" min="1" max="8" step="1" />
+        </div>
+        <p class="help small">Aantal obers in de simulatie. Later wordt dit een uitkomst in plaats van een invoer: zo weinig personeel als de zaal toelaat.</p>
+      </details>
+    </section>
+
+    <section class="sheet paper-gloss">
+      <h2><span class="num">4</span>Gezelschap</h2>
+      <div class="slider"><label>Gemiddelde leeftijd <output id="avgAgeVal"></output></label><input id="avgAge" type="range" min="20" max="75" step="1" /></div>
+      <div class="slider"><label>Leeftijdsspreiding <output id="ageSpreadVal"></output></label><input id="ageSpread" type="range" min="0" max="30" step="1" /></div>
+      <div class="slider"><label>Dorst <output id="thirstVal"></output></label><input id="thirst" type="range" min="0.5" max="2" step="0.05" /></div>
+      <div class="slider"><label>Honger <output id="appetiteVal"></output></label><input id="appetite" type="range" min="0.5" max="2" step="0.05" /></div>
+      <div class="slider"><label>Vakmanschap bediening <output id="waiterSkillVal"></output></label><input id="waiterSkill" type="range" min="0" max="1" step="0.05" /></div>
+    </section>
+
+    <section class="sheet paper-hand tape-tl">
+      <h2><span class="num">5</span>Genereren</h2>
+      <ul id="checklist" class="checklist"></ul>
+      <div class="field">
+        <label for="quality">Grondigheid</label>
+        <select id="quality" class="select">
+          <option value="snel">Snel</option>
+          <option value="normaal">Normaal</option>
+          <option value="grondig">Grondig</option>
+        </select>
+      </div>
+      <p id="qualityHint" class="help small"></p>
+      <div class="field">
+        <label for="topN">Voorstellen</label>
+        <select id="topN" class="select">
+          <option value="3">3 indelingen</option>
+          <option value="5">5 indelingen</option>
+          <option value="8">8 indelingen</option>
+        </select>
+      </div>
+      <div class="row">
+        <button id="btnGenerate" class="btn primary letter">Genereer indelingen</button>
+        <button id="btnCancel" class="btn ghost" hidden>Stop</button>
+      </div>
+      <div id="jobProgress" class="progress" hidden>
+        <div class="bar"><div id="jobBar"></div></div>
+        <div id="jobMsg" class="small"></div>
+        <details><summary>Logboek</summary><pre id="jobLog"></pre></details>
+      </div>
+    </section>
+
+  </aside>
+
+  <!-- ── Midden: plattegrond ───────────────────────────────────────── -->
+  <section class="stage">
+    <div class="toolbar">
+      <div class="group">
+        <button class="tool active" data-tool="select" title="Selecteren en verplaatsen (Esc)">Selecteer</button>
+        <button class="tool" data-tool="pan" title="Pannen (of spatie ingedrukt houden)">Pan</button>
+      </div>
+      <div class="group">
+        <button class="tool" data-tool="rect" title="Vloer tekenen">Vloer</button>
+        <button class="tool" data-tool="block" title="Kolom of podium">Obstakel</button>
+        <button class="tool" data-tool="bar" title="Bar tegen een wand">Bar</button>
+        <button class="tool" data-tool="buffet" title="Buffetlijn tegen een wand">Buffet</button>
+        <button class="tool" data-tool="entrance" title="Ingang op een wand">Ingang</button>
+        <button class="tool" data-tool="table" title="Tafel van je huidige indeling">Tafel</button>
+        <button class="tool" data-tool="photo" title="Foto verschuiven">Foto</button>
+      </div>
+      <div class="group right">
+        <button id="btnRotate" class="tool" title="Draai tafel (R)">Draai</button>
+        <button id="btnDelete" class="tool" title="Verwijder selectie (Delete)">Wis</button>
+        <button id="btnUndo" class="tool" title="Ongedaan maken (Ctrl+Z)">Terug</button>
+        <button id="btnFitView" class="tool" title="Alles in beeld">Passend</button>
+      </div>
+    </div>
+    <div class="plan-shadow"><div class="sheet plan" id="planSheet">
+      <div class="canvas-wrap"><canvas id="plan"></canvas></div>
+    </div></div>
+    <div class="statusline">
+      <span id="status"></span>
+      <span class="spacer"></span>
+      <span id="cursorPos" class="mono"></span>
+      <span id="zoomLabel" class="mono"></span>
+    </div>
+  </section>
+
+  <!-- ── Rechts: eigenschappen en resultaten ───────────────────────── -->
+  <aside class="panel right">
+    <section class="sheet paper-card tape-tr">
+      <h2>Eigenschappen</h2>
+      <div id="props" class="stack"><p class="help">Selecteer iets op de plattegrond.</p></div>
+    </section>
+
+    <section class="sheet results paper-news tape-tl">
+      <h2>Resultaten</h2>
+      <div id="resultsEmpty" class="help">Nog geen indelingen. Vul links de zaal, tafels en het feest in en klik op Genereer.</div>
+      <div id="resultsBody" hidden>
+        <p id="resultsMeta" class="help small"></p>
+        <div id="resultCards" class="cards"></div>
+        <label class="check"><input id="showCurrent" type="checkbox" checked /> Huidige indeling eroverheen tonen</label>
+        <div class="row wrap">
+          <button id="btnPlay" class="btn primary letter">Afspelen</button>
+          <button id="btnExportPng" class="btn ghost">PNG</button>
+          <button id="btnExportJson" class="btn ghost">JSON</button>
+        </div>
+      </div>
+    </section>
+  </aside>
+</main>
+
+<!-- Afspelen van de simulatie -->
+<div id="playModal" class="modal" hidden>
+  <div class="modal-sheet sheet paper-hand">
+    <div class="modal-head">
+      <h2 id="playTitle">Simulatie</h2>
+      <div class="group">
+        <button class="tool speed" data-speed="1">1x</button>
+        <button class="tool speed active" data-speed="5">5x</button>
+        <button class="tool speed" data-speed="20">20x</button>
+        <button class="tool speed" data-speed="60">60x</button>
+        <button id="playPause" class="tool">Pauze</button>
+        <button id="playClose" class="tool">Sluit</button>
+      </div>
+    </div>
+    <div class="modal-body">
+      <div class="frame-wrap"><iframe id="playFrame" title="Simulatie"></iframe></div>
+      <dl id="playMetrics" class="facts wide"></dl>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script type="module" src="/js/main.js"></script>
+</body>
+</html>

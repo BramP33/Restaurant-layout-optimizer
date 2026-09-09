@@ -61,3 +61,5 @@ data/room-pool.json
 
 # Losse werkmap, hoort niet in de repo
 De competitie/
+# Jobuitvoer (regenereerbaar)
+app/server/jobs/
